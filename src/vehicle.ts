@@ -13,6 +13,8 @@ export interface VehicleVisual {
     node: THREE.Object3D;
     rest: THREE.Quaternion;
     axis: THREE.Vector3;
+    steerAxis: THREE.Vector3;
+    isFront: boolean;
     radius: number;
     spinDirection: number;
   }>;
@@ -373,7 +375,14 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
         const axleInVehicle = axis.clone().applyQuaternion(rootRelativeQuaternion).normalize();
         const positiveRotationTravel = new THREE.Vector3().crossVectors(axleInVehicle, down).dot(forward);
         const spinDirection = positiveRotationTravel >= 0 ? -1 : 1;
-        return { node, rest: node.quaternion.clone(), axis, radius, spinDirection };
+        const parentQuaternion = node.parent?.getWorldQuaternion(new THREE.Quaternion()) ?? new THREE.Quaternion();
+        const parentRelativeQuaternion = rootInverseQuaternion.clone().multiply(parentQuaternion);
+        const steerAxis = new THREE.Vector3(0, 1, 0)
+          .applyQuaternion(parentRelativeQuaternion.invert())
+          .normalize();
+        const nodeName = node.name || String(node.userData.name ?? '');
+        const isFront = /^3dwheel[\s_]+front[\s_]+(l|r)(?:\b|_)/i.test(nodeName);
+        return { node, rest: node.quaternion.clone(), axis, steerAxis, isFront, radius, spinDirection };
       })
       : [];
     if (wheelNodes.length !== 4) {
@@ -449,14 +458,20 @@ export function disposeVehicleVisual(visual: VehicleVisual): void {
   visual.root.clear();
 }
 
-export function setVehicleWheelSpin(visual: VehicleVisual, distance: number): void {
+export function setVehicleWheelSpin(visual: VehicleVisual, distance: number, steeringAngle = 0): void {
   // Procedural wheels use +X as their axle and the car moves along +Z.
   for (const wheel of visual.wheels) wheel.rotation.x = -distance / visual.wheelRadius;
   const spin = new THREE.Quaternion();
+  const steer = new THREE.Quaternion();
   for (const wheel of visual.modelWheels) {
     const angle = distance / wheel.radius * wheel.spinDirection;
     spin.setFromAxisAngle(wheel.axis, angle);
-    wheel.node.quaternion.copy(wheel.rest).multiply(spin);
+    wheel.node.quaternion.copy(wheel.rest);
+    if (wheel.isFront) {
+      steer.setFromAxisAngle(wheel.steerAxis, steeringAngle);
+      wheel.node.quaternion.premultiply(steer);
+    }
+    wheel.node.quaternion.multiply(spin);
     wheel.node.updateMatrix();
   }
 }

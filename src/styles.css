@@ -750,7 +750,7 @@ button { color: inherit; }
 }
 
 @media (max-height: 600px) and (pointer: coarse) {
-  .steer-button, .brake-button { height: 60px; }
+  .steer-button ,.brake-button { height: 60px; }
   .gas-button { height: 68px; }
   .handbrake-button { height: 36px; }
   .shift-button { height: 34px; }

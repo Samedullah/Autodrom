@@ -483,7 +483,7 @@ export class DriveEngine {
     this.carRoot.position.y = 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
     this.updateSkids(dt, drifting);
     this.wheelTravel += longitudinal * dt;
-    setVehicleWheelSpin(this.visual, this.wheelTravel);
+    setVehicleWheelSpin(this.visual, this.wheelTravel, steerInput * maxSteeringAngle);
   }
 
   private checkSpeedGates(): void {
