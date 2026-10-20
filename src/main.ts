@@ -116,6 +116,16 @@ function returnToPrevious(): void {
 }
 
 function handleAction(action: UiAction, id?: string): void {
+  if (action === 'toggle-drift') {
+    ui?.setDriftModeEnabled(engine.toggleDriftMode());
+    ui?.setMasterModeEnabled(engine.isMasterModeEnabled());
+    return;
+  }
+  if (action === 'toggle-usta') {
+    ui?.setMasterModeEnabled(engine.toggleMasterMode());
+    ui?.setDriftModeEnabled(engine.isDriftModeEnabled());
+    return;
+  }
   if (action === 'start' || action === 'continue' || action === 'starter' || action === 'select-starter') {
     requestMobileFullscreen();
   }

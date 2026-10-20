@@ -6,6 +6,9 @@ import type { VehicleSpec } from './data';
 export interface VehicleVisual {
   root: THREE.Group;
   wheels: THREE.Group[];
+  steerWheels: THREE.Group[];
+  spinQuaternion: THREE.Quaternion;
+  steerQuaternion: THREE.Quaternion;
   wheelRadius: number;
   procedural: THREE.Group;
   modelLoaded: boolean;
@@ -103,6 +106,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
   const procedural = new THREE.Group();
   root.add(procedural);
   const wheels: THREE.Group[] = [];
+  const steerWheels: THREE.Group[] = [];
   const body = makeMaterial(spec.bodyColor, 0.32, 0.42);
   const trim = makeMaterial('#19211f', 0.62, 0.16);
   const rubber = makeMaterial('#111614', 0.83, 0.05);
@@ -249,10 +253,13 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
 
   for (const z of [axleFront, axleRear]) {
     for (const side of [-1, 1]) {
+      const steeringPivot = new THREE.Group();
+      steeringPivot.position.set(side * wheelX, wheelRadius + 0.025, z);
       const wheel = createWheel(wheelRadius, 0.23, rubber, alloy);
-      wheel.position.set(side * wheelX, wheelRadius + 0.025, z);
-      procedural.add(wheel);
+      steeringPivot.add(wheel);
+      procedural.add(steeringPivot);
       wheels.push(wheel);
+      if (z === axleFront) steerWheels.push(steeringPivot);
     }
   }
 
@@ -284,7 +291,20 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
       object.receiveShadow = true;
     }
   });
-  return { root, wheels, wheelRadius, procedural, modelLoaded: false, modelWheels: [], modelInstance: null, releaseModel: null, disposed: false };
+  return {
+    root,
+    wheels,
+    steerWheels,
+    spinQuaternion: new THREE.Quaternion(),
+    steerQuaternion: new THREE.Quaternion(),
+    wheelRadius,
+    procedural,
+    modelLoaded: false,
+    modelWheels: [],
+    modelInstance: null,
+    releaseModel: null,
+    disposed: false,
+  };
 }
 
 function getCachedModel(path: string, targetLength: number, rotationY = 0, excludeNodes: string[] = []): CachedModel {
@@ -343,7 +363,8 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
     instance.traverse((object) => {
       const nodeName = object.name || String(object.userData.name ?? '');
       // GLTFLoader turns spaces in some node names into underscores.
-      if (!/^3dwheel[\s_]+(front|rear)[\s_]+(l|r)(?:\b|_)/i.test(nodeName)) return;
+      const isNamedWheel = /^(?:3dwheel[\s_]+(?:front|rear)[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL|BR|BL)_steer(?:\.001|001)?(?:\b|_))/i.test(nodeName);
+      if (!isNamedWheel) return;
       // GLTF nodes authored with a matrix keep matrixAutoUpdate disabled. Decompose
       // their existing pivot transform before changing quaternions each frame.
       object.matrix.decompose(object.position, object.quaternion, object.scale);
@@ -381,7 +402,7 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
           .applyQuaternion(parentRelativeQuaternion.invert())
           .normalize();
         const nodeName = node.name || String(node.userData.name ?? '');
-        const isFront = /^3dwheel[\s_]+front[\s_]+(l|r)(?:\b|_)/i.test(nodeName);
+        const isFront = /^(?:3dwheel[\s_]+front[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL)_steer(?:\.001|001)?(?:\b|_))/i.test(nodeName);
         return { node, rest: node.quaternion.clone(), axis, steerAxis, isFront, radius, spinDirection };
       })
       : [];
@@ -458,20 +479,23 @@ export function disposeVehicleVisual(visual: VehicleVisual): void {
   visual.root.clear();
 }
 
-export function setVehicleWheelSpin(visual: VehicleVisual, distance: number, steeringAngle = 0): void {
+export function setVehicleWheelSpin(visual: VehicleVisual, distance: number, steeringAngle = 0, rearDistance = distance): void {
   // Procedural wheels use +X as their axle and the car moves along +Z.
-  for (const wheel of visual.wheels) wheel.rotation.x = -distance / visual.wheelRadius;
-  const spin = new THREE.Quaternion();
-  const steer = new THREE.Quaternion();
+  for (const wheel of visual.steerWheels) wheel.rotation.y = steeringAngle;
+  for (let i = 0; i < visual.wheels.length; i += 1) {
+    const wheelDistance = i >= 2 ? rearDistance : distance;
+    visual.wheels[i].rotation.x = -wheelDistance / visual.wheelRadius;
+  }
   for (const wheel of visual.modelWheels) {
-    const angle = distance / wheel.radius * wheel.spinDirection;
-    spin.setFromAxisAngle(wheel.axis, angle);
+    const wheelDistance = wheel.isFront ? distance : rearDistance;
+    const angle = wheelDistance / wheel.radius * wheel.spinDirection;
+    visual.spinQuaternion.setFromAxisAngle(wheel.axis, angle);
     wheel.node.quaternion.copy(wheel.rest);
     if (wheel.isFront) {
-      steer.setFromAxisAngle(wheel.steerAxis, steeringAngle);
-      wheel.node.quaternion.premultiply(steer);
+      visual.steerQuaternion.setFromAxisAngle(wheel.steerAxis, steeringAngle);
+      wheel.node.quaternion.premultiply(visual.steerQuaternion);
     }
-    wheel.node.quaternion.multiply(spin);
+    wheel.node.quaternion.multiply(visual.spinQuaternion);
     wheel.node.updateMatrix();
   }
 }

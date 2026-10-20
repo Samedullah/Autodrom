@@ -7,7 +7,7 @@ import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel } from
 export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'pause' | 'store' | null;
 export type UiAction = 'start' | 'continue' | 'starter' | 'garage' | 'store' | 'maps' | 'settings' | 'pause'
   | 'resume' | 'main' | 'select-starter' | 'buy' | 'activate' | 'choose-map' | 'close' | 'fullscreen' | 'reset-position'
-  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down';
+  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift' | 'toggle-usta';
 
 export interface UiSnapshot {
   save: SaveData;
@@ -41,6 +41,8 @@ export class GameInterface {
   private readonly rpmValue: HTMLElement;
   private readonly rpmRing: HTMLElement;
   private readonly driftBadge: HTMLElement;
+  private readonly driftModeButton: HTMLButtonElement;
+  private readonly masterModeButton: HTMLButtonElement;
   private readonly cashValue: HTMLElement;
   private readonly mapValue: HTMLElement;
   private readonly incomeToast: HTMLElement;
@@ -60,7 +62,7 @@ export class GameInterface {
       '<header class="topbar">' +
         '<div class="brand-lockup"><span class="brand-mark">A</span><span><b>AUTODROM</b><small>DRIVE&nbsp; / &nbsp;BUILD</small></span></div>' +
         '<div class="cash-card"><span class="cash-label">GARAJ BAKİYESİ</span><strong id="cash-value">₺10.000</strong><i class="cash-dot"></i></div>' +
-        '<div class="top-meta"><span class="live-chip"><i></i> CANLI SÜRÜŞ</span><span class="map-pill" id="map-value">ŞEHİR İÇİ</span><button class="icon-button pause-button" data-action="pause" aria-label="Oyunu duraklat">Ⅱ</button></div>' +
+        '<div class="top-meta"><span class="live-chip"><i></i> CANLI SÜRÜŞ</span><span class="map-pill" id="map-value">ŞEHİR İÇİ</span><button class="drift-mode-toggle" type="button" data-action="toggle-drift" aria-label="Drift modunu aç" aria-pressed="false"><span>DRIFT</span><b>KAPALI</b></button><button class="master-mode-toggle" type="button" data-action="toggle-usta" aria-label="Usta Modunu aç" aria-pressed="false"><span>USTA</span><b>KAPALI</b></button><button class="icon-button pause-button" data-action="pause" aria-label="Oyunu duraklat">Ⅱ</button></div>' +
       '</header>' +
       '<nav class="side-rail" aria-label="Oyun menüsü">' +
         '<button class="rail-button" data-action="store" aria-label="Araç mağazası"><span>◈</span><small>MAĞAZA</small></button>' +
@@ -101,6 +103,8 @@ export class GameInterface {
     this.rpmValue = host.querySelector('#rpm-value') as HTMLElement;
     this.rpmRing = host.querySelector('#rpm-ring') as HTMLElement;
     this.driftBadge = host.querySelector('#drift-indicator') as HTMLElement;
+    this.driftModeButton = host.querySelector('.drift-mode-toggle') as HTMLButtonElement;
+    this.masterModeButton = host.querySelector('.master-mode-toggle') as HTMLButtonElement;
     this.cashValue = host.querySelector('#cash-value') as HTMLElement;
     this.mapValue = host.querySelector('#map-value') as HTMLElement;
     this.incomeToast = host.querySelector('#income-toast') as HTMLElement;
@@ -248,6 +252,20 @@ export class GameInterface {
     this.rpmRing.classList.toggle('limiter', limiter);
     this.rpmValue.parentElement?.classList.toggle('limiter', limiter);
     this.driftBadge.classList.toggle('active', telemetry.drifting);
+  }
+
+  setDriftModeEnabled(enabled: boolean): void {
+    this.driftModeButton.classList.toggle('active', enabled);
+    this.driftModeButton.setAttribute('aria-pressed', String(enabled));
+    this.driftModeButton.setAttribute('aria-label', enabled ? 'Drift modunu kapat' : 'Drift modunu aç');
+    this.driftModeButton.querySelector('b')!.textContent = enabled ? 'AÇIK' : 'KAPALI';
+  }
+
+  setMasterModeEnabled(enabled: boolean): void {
+    this.masterModeButton.classList.toggle('active', enabled);
+    this.masterModeButton.setAttribute('aria-pressed', String(enabled));
+    this.masterModeButton.setAttribute('aria-label', enabled ? 'Usta Modunu kapat' : 'Usta Modunu aç');
+    this.masterModeButton.querySelector('b')!.textContent = enabled ? 'AÇIK' : 'KAPALI';
   }
 
   showIncome(amount: number): void {

@@ -224,6 +224,14 @@ export const VEHICLES: VehicleSpec[] = [
     modelPath: '/assets/models/GLB/RENAULT/2010_renault_megane_rs_250_cup.glb', modelRotationY: 0,
     realSpecs: { modelYear: 2010, powerHp: 250, engineDisplacementCc: 1998, torqueNm: 340, drive: 'FWD', transmission: '6 ileri manuel', sourceIds: ['RENAULT_RS250'], note: 'Renault 2009 lansman açıklaması Sport/Cup şasi seçenekleri için aynı 250 hp ve 340 Nm motoru belirtir.' }, starterChoice: false,
   },
+  {
+    id: 'bugatti-la-voiture-noire', name: 'Bugatti La Voiture Noire', shortName: 'La Voiture Noire', subtitle: '8.0 L W16 ve sürekli dört çeker', brand: 'Bugatti',
+    category: 'SUPER', price: 2400000, maxSpeed: 420, acceleration: 28.1, braking: 24.8,
+    handling: 0.97, steering: 1.47, power: 1479, bodyStyle: 'super', bodyColor: '#a7a9ad',
+    length: 4.35, width: 1.90, height: 1.18,
+    modelPath: '/assets/models/GLB/BUGATTI/bugatti_la_voiture_noire.glb', modelRotationY: 0,
+    realSpecs: { modelYear: 2019, powerHp: 1479, engineDisplacementCc: 5204, torqueNm: 1600, drive: 'AWD', transmission: '6 ileri manuel veya 6 ileri E-Gear', sourceIds: ['LAMBORGHINI_GALLARDO'], note: 'Admin koydu' }, starterChoice: false,
+  },
 ];
 
 export const STARTER_VEHICLES = VEHICLES.filter((vehicle) => vehicle.starterChoice);

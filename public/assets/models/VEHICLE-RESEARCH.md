@@ -26,6 +26,7 @@ GLB sahneleri ve düğümleri incelendi. Altı modelde dört ayrı `3DWheel Fron
 | Lamborghini Gallardo LP560-4 Spyder | `LAMBORGHINI/2009_lamborghini_gallardo_lp560-4_spyder.glb` | Lastik/fren parçaları var; dört pivot doğrulanmadı |
 | Mercedes-Benz SLR McLaren 722 Edition | `MERCEDES/asphalt_8_-_mercedesbenz_slr_mclaren_722_edition.glb` | 7 meshli, tekerlek pivotu görünmüyor |
 | Renault Mégane R.S. 250 Cup | `RENAULT/2010_renault_megane_rs_250_cup.glb` | Genel grup/mesh yapısı; pivot görünmüyor |
+| Bugatti La Voiture Noire  | `BUGATTI/bugatti_la_voiture_noire.glb` | Dört dönüş pivotu |
 
 Model yönü dosya yapısı ve adlandırılmış tekerlek pivotlarıyla kontrol edildi. Modeller kendi uzunluk ölçüsüne göre mevcut oyun ölçeğine uydurulur, yatayda ortalanır ve taban noktası zemine alınır. Bu işlem gerçek otomobil verisini veya sürüş parametrelerini değiştirmez. Mağaza kamerası model sınır kutusuna ve ekran oranına göre mesafesini ayarlar; aracın oranları esnetilmez.
 

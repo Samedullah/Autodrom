@@ -26,6 +26,26 @@ export interface EngineCallbacks {
 
 const GEAR_SPEED = [0, 0.17, 0.31, 0.48, 0.66, 0.84, 1];
 const GEAR_TORQUE = [0, 1, 0.82, 0.68, 0.57, 0.49, 0.43];
+const MASTER_PHYSICS = {
+  step: 1 / 120,
+  frontLoad: 0.52,
+  tireGrip: 1.15,
+  corneringStiffness: 54,
+  yawInertiaFactor: 0.28,
+  rollingResistance: 0.08,
+  steeringRate: 4.2,
+  steeringReturnRate: 3.2,
+  drivetrainEfficiency: 0.82,
+  lowSpeedPowerReference: 8,
+} as const;
+
+const FALLBACK_MASS_KG: Record<VehicleSpec['category'], number> = {
+  EKONOMI: 1120,
+  SEHIR: 1375,
+  SPORT: 1480,
+  PERFORMANS: 1630,
+  SUPER: 1540,
+};
 
 function pixelRatioLimit(quality: GameSettings['quality']): number {
   if (quality === 'ultra') return 2.25;
@@ -37,6 +57,15 @@ function shadowMapResolution(quality: GameSettings['quality']): number {
   if (quality === 'ultra') return 3072;
   if (quality === 'high') return 1536;
   return 1024;
+}
+
+function tireForceFromSlip(slipAngle: number, stiffness: number, limit: number): number {
+  if (limit <= 0) return 0;
+  return -limit * Math.tanh((stiffness * slipAngle) / limit);
+}
+
+function vehicleMassKg(vehicle: VehicleSpec): number {
+  return vehicle.realSpecs?.weightKg ?? FALLBACK_MASS_KG[vehicle.category];
 }
 
 export class DriveEngine {
@@ -58,10 +87,18 @@ export class DriveEngine {
   private gear: Gear = 1;
   private velocity = new THREE.Vector3();
   private yaw = Math.PI / 2;
+  private yawRate = 0;
+  private frontWheelAngle = 0;
+  private previousSteerInput = 0;
+  private flickLoad = 0;
   private cameraOrbit = 0;
   private cameraElevation = Math.asin(3.6 / 9.2);
   private cameraZoom = 1;
   private drivingEnabled = false;
+  private driftModeEnabled = false;
+  private driftModeBlend = 0;
+  private masterModeEnabled = false;
+  private handbrakeGripBlend = 0;
   private cameraPointerId: number | null = null;
   private cameraPointerX = 0;
   private cameraPointerY = 0;
@@ -72,6 +109,7 @@ export class DriveEngine {
   private renderElapsed = 0;
   private telemetryElapsed = 0;
   private wheelTravel = 0;
+  private rearWheelTravel = 0;
   private driftValue = 0;
   private readonly forward = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
@@ -82,9 +120,18 @@ export class DriveEngine {
   private drivingElapsed = 0;
   private readonly skidMarks: THREE.InstancedMesh;
   private readonly skidDummy = new THREE.Object3D();
+  private readonly skidPreviousPositions: [THREE.Vector3, THREE.Vector3] = [new THREE.Vector3(), new THREE.Vector3()];
+  private readonly skidCurrentPositions: [THREE.Vector3, THREE.Vector3] = [new THREE.Vector3(), new THREE.Vector3()];
+  private readonly skidModelLocalPositions: [THREE.Vector3, THREE.Vector3] = [new THREE.Vector3(), new THREE.Vector3()];
+  private readonly skidPreviousCenter = new THREE.Vector3();
+  private readonly skidCurrentCenter = new THREE.Vector3();
+  private readonly skidFrameTravel = new THREE.Vector3();
+  private readonly skidInterpolatedPosition = new THREE.Vector3();
+  private skidModelPositionsReady = false;
+  private hasPreviousSkidPositions = false;
   private skidIndex = 0;
   private skidCount = 0;
-  private skidElapsed = 0;
+  private skidDistance = 0;
   private static readonly skidCapacity = 300;
   private readonly ambient: THREE.HemisphereLight;
   private readonly resizeObserver: ResizeObserver;
@@ -124,6 +171,8 @@ export class DriveEngine {
     this.skidMarks.count = 0;
     this.skidMarks.visible = this.settings.effects;
     this.skidMarks.receiveShadow = true;
+    this.skidMarks.frustumCulled = false;
+    this.skidMarks.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.skidMarks);
     this.worldData = buildWorld(mapId, this.settings);
     this.scene.add(this.worldData.root);
@@ -281,6 +330,24 @@ export class DriveEngine {
     else this.touchKeys.delete(key[control]);
   }
 
+  toggleDriftMode(): boolean {
+    this.driftModeEnabled = !this.driftModeEnabled;
+    if (this.driftModeEnabled) this.masterModeEnabled = false;
+    return this.driftModeEnabled;
+  }
+
+  toggleMasterMode(): boolean {
+    this.masterModeEnabled = !this.masterModeEnabled;
+    if (this.masterModeEnabled) {
+      this.driftModeEnabled = false;
+      this.driftModeBlend = 0;
+    }
+    return this.masterModeEnabled;
+  }
+
+  isDriftModeEnabled(): boolean { return this.driftModeEnabled; }
+  isMasterModeEnabled(): boolean { return this.masterModeEnabled; }
+
   private isDown(key: string): boolean {
     return this.keys.has(key) || this.touchKeys.has(key);
   }
@@ -300,6 +367,8 @@ export class DriveEngine {
       this.touchKeys.clear();
       this.endCameraDrag();
       this.velocity.set(0, 0, 0);
+      this.yawRate = 0;
+      this.frontWheelAngle = 0;
       this.driftValue = 0;
       this.incomeClock.reset();
       this.callbacks.onTelemetry({ speedKmh: 0, gear: this.gear, rpm: 850, drifting: false });
@@ -311,6 +380,8 @@ export class DriveEngine {
     this.gear = 1;
     this.velocity.set(0, 0, 0);
     this.wheelTravel = 0;
+    this.rearWheelTravel = 0;
+    this.skidModelPositionsReady = false;
     this.incomeClock.reset();
     this.clearSkids();
     this.carRoot.remove(this.visual.root);
@@ -345,6 +416,7 @@ export class DriveEngine {
       this.sun.shadow.mapSize.set(shadowResolution, shadowResolution);
     }
     this.skidMarks.visible = settings.effects;
+    if (!settings.effects) this.clearSkids();
     this.ambient.intensity = settings.quality === 'low' ? 1.7 : 2.15;
     this.sun.intensity = settings.quality === 'low' ? 2.4 : 3.1;
     this.applyMapPalette();
@@ -360,6 +432,10 @@ export class DriveEngine {
   resetCar(): void {
     this.carRoot.position.copy(this.worldData.spawn);
     this.yaw = this.worldData.spawnYaw;
+    this.yawRate = 0;
+    this.frontWheelAngle = 0;
+    this.previousSteerInput = 0;
+    this.flickLoad = 0;
     this.velocity.set(0, 0, 0);
     this.previousCarPosition.copy(this.worldData.spawn);
     this.speedGateCooldowns.clear();
@@ -419,6 +495,12 @@ export class DriveEngine {
     const brake = this.isDown('s');
     const steerInput = (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0);
     const handbrake = this.isDown(' ');
+    if (this.masterModeEnabled) {
+      this.updateMasterDriving(dt, gas, brake, steerInput, handbrake);
+      return;
+    }
+    this.driftModeBlend = approach(this.driftModeBlend, this.driftModeEnabled ? 1 : 0, dt * 2.2);
+    this.handbrakeGripBlend = approach(this.handbrakeGripBlend, handbrake ? 1 : 0, dt * (handbrake ? 8 : 2.8));
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     let longitudinal = this.velocity.dot(this.forward);
@@ -439,36 +521,70 @@ export class DriveEngine {
     } else if (gas && this.gear === -1) {
       longitudinal = Math.max(-11, longitudinal - this.vehicle.acceleration * 0.48 * dt);
     } else if (this.gear === 0) {
-      longitudinal *= Math.exp(-0.85 * dt);
+      longitudinal *= Math.exp(-0.08 * dt);
     } else {
-      longitudinal *= Math.exp(-0.13 * dt);
+      longitudinal *= Math.exp(-0.16 * dt);
     }
 
-    // Apply the throttle/brake change in the car's current direction before
-    // steering, then preserve that world-space momentum as the body turns.
+    // Keep world momentum independent from body heading while the tire forces
+    // update the body-frame forward and lateral components below.
     this.velocity.copy(this.forward).multiplyScalar(longitudinal).addScaledVector(this.right, lateral);
-    const speed = Math.abs(longitudinal);
-    const wantsDrift = handbrake && speed > 5 && Math.abs(steerInput) > 0.05;
+    const speed = this.velocity.length();
+    const steeringDemand = THREE.MathUtils.clamp(Math.abs(steerInput) * (0.25 + speed / 12), 0, 1);
+    const reversalImpulse = this.previousSteerInput * steerInput < 0
+      ? THREE.MathUtils.clamp(Math.abs(steerInput - this.previousSteerInput) * 0.5, 0, 1) * THREE.MathUtils.clamp(speed / 20, 0, 1)
+      : 0;
+    this.flickLoad = Math.max(reversalImpulse, this.flickLoad * Math.exp(-dt / 0.28));
+    this.previousSteerInput = steerInput;
     const wheelbase = Math.max(2, this.vehicle.length * 0.58);
     const maxSteeringAngle = Math.min(0.78, this.vehicle.steering * 0.5);
+    // Preserve the game's existing A/D steering convention; smooth only the wheel animation.
+    const steeringTarget = steerInput * maxSteeringAngle;
+    this.frontWheelAngle = approach(this.frontWheelAngle, steeringTarget, (3.8 + 1.2 * this.driftModeBlend) * this.vehicle.handling * dt);
     const steeringYawRate = longitudinal / wheelbase * Math.tan(steerInput * maxSteeringAngle);
-    const lateralGrip = this.vehicle.handling * (wantsDrift ? 30 : 40);
-    const maxYawRate = Math.min(wantsDrift ? 1.9 : 2.1, lateralGrip / Math.max(speed, 2.5));
-    const driftYawRate = wantsDrift ? THREE.MathUtils.clamp(-lateral * 0.12, -0.75, 0.75) : 0;
-    const yawRateLimit = Math.min(2.4, maxYawRate * (wantsDrift ? 1.5 : 1));
-    this.yaw += THREE.MathUtils.clamp(steeringYawRate + driftYawRate, -yawRateLimit, yawRateLimit) * dt;
+
+    const normalLateralGrip = this.vehicle.handling * (steeringDemand < 0.05 ? 11.5 : 9.8);
+    const driftLateralGrip = this.vehicle.handling * Math.max(2.1, 5.1 - steeringDemand * 1.9 - (gas ? 0.65 : 0.25) + (brake ? 0.3 : 0));
+    let lateralRecovery = THREE.MathUtils.lerp(normalLateralGrip, driftLateralGrip, this.driftModeBlend);
+    if (brake && speed > 7) {
+      lateralRecovery *= 1 - 0.14 * THREE.MathUtils.clamp((speed - 7) / 16, 0, 1) * steeringDemand;
+    }
+    lateralRecovery *= 1 - this.flickLoad * (0.06 + 0.08 * this.driftModeBlend);
+    if (speed > 4 && this.handbrakeGripBlend > 0) {
+      const handbrakeGrip = this.vehicle.handling * THREE.MathUtils.lerp(2.25, 1.3, this.driftModeBlend);
+      lateralRecovery = THREE.MathUtils.lerp(lateralRecovery, Math.min(lateralRecovery, handbrakeGrip), this.handbrakeGripBlend);
+    }
+    const counterSteering = Math.abs(lateral) > 0.1 && Math.abs(steerInput) > 0.05 && Math.sign(lateral) === Math.sign(steerInput);
+    if (counterSteering) lateralRecovery += this.vehicle.handling * (3.2 - 0.8 * this.driftModeBlend) * Math.abs(steerInput);
+
+    const steeringReleased = Math.abs(steerInput) <= 0.05;
+    const releaseYawAssist = steeringReleased ? 0.1 * (1 - this.driftModeBlend) : 0;
+    const counterSteerYaw = counterSteering ? 0.1 * Math.abs(steerInput) : 0;
+    const slipYawRate = lateral / wheelbase * (0.12 + 0.28 * this.driftModeBlend + 0.12 * this.handbrakeGripBlend + releaseYawAssist + counterSteerYaw);
+    const handbrakeTurn = handbrake && speed > 5 && Math.abs(steerInput) > 0.05;
+    const maximumYawRate = Math.min(
+      handbrakeTurn ? 1.9 : 2.1 + 0.3 * this.driftModeBlend,
+      this.vehicle.handling * (handbrakeTurn ? 30 : 40 + 5 * this.driftModeBlend) / Math.max(speed, 2.5),
+    );
+    const yawRateLimit = Math.min(2.4, maximumYawRate * (handbrakeTurn ? 1.5 : 1));
+    const targetYawRate = THREE.MathUtils.clamp(steeringYawRate + slipYawRate, -yawRateLimit, yawRateLimit);
+    const speedLoad = THREE.MathUtils.clamp(speed / 35, 0, 1);
+    const yawAcceleration = this.vehicle.handling * THREE.MathUtils.lerp(8, 4.8, speedLoad) * (1 + 0.15 * this.driftModeBlend);
+    this.yawRate = approach(this.yawRate, targetYawRate, yawAcceleration * dt);
+    this.yaw += this.yawRate * dt;
 
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    // Project the old world velocity against the new heading. This lets the
-    // body rotate around moving momentum instead of snapping the whole car's
-    // velocity to the steering direction.
+    // Reproject world momentum against the updated heading, then let grip
+    // gradually reduce lateral speed instead of snapping it to zero.
     longitudinal = this.velocity.dot(this.forward);
     lateral = this.velocity.dot(this.right);
-    lateral *= Math.exp(-(wantsDrift ? 0.9 : 9.2 * this.vehicle.handling) * dt);
+    lateral *= Math.exp(-lateralRecovery * dt);
     const slipAngle = Math.atan2(Math.abs(lateral), Math.max(Math.abs(longitudinal), 1));
-    const drifting = wantsDrift && slipAngle > 0.065;
-    this.driftValue = drifting ? Math.min(1, this.driftValue + dt * 2.2) : Math.max(0, this.driftValue - dt * 2.8);
+    const drifting = (handbrake || this.driftModeBlend > 0.15 || this.driftValue > 0.08)
+      && speed > 6 && slipAngle > 0.12 && Math.abs(lateral) > 1.25;
+    const driftSeverity = THREE.MathUtils.clamp((slipAngle - 0.12) / 0.42, 0, 1);
+    this.driftValue = drifting ? Math.min(1, this.driftValue + dt * (1.5 + driftSeverity * 2)) : Math.max(0, this.driftValue - dt * 3.4);
 
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
@@ -481,9 +597,191 @@ export class DriveEngine {
     this.checkSpeedGates();
     this.carRoot.rotation.y = this.yaw;
     this.carRoot.position.y = 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
-    this.updateSkids(dt, drifting);
+    this.updateSkids(drifting, slipAngle, speed);
     this.wheelTravel += longitudinal * dt;
-    setVehicleWheelSpin(this.visual, this.wheelTravel, steerInput * maxSteeringAngle);
+    this.rearWheelTravel = this.wheelTravel;
+    setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel);
+  }
+
+  private updateMasterDriving(dt: number, gas: boolean, brake: boolean, steerInput: number, handbrake: boolean): void {
+    if (gas && this.gear === 0) this.gear = 1;
+    let remaining = dt;
+    let speed = this.velocity.length();
+    let slipAngle = 0;
+    const steerReversal = this.previousSteerInput * steerInput < 0
+      ? THREE.MathUtils.clamp(Math.abs(steerInput - this.previousSteerInput), 0, 1)
+        * THREE.MathUtils.clamp(speed / 12, 0, 1)
+      : 0;
+    this.flickLoad = Math.max(steerReversal, this.flickLoad);
+    const topSpeed = this.vehicle.maxSpeed / ECONOMY.kmhPerUnit;
+    const massKg = vehicleMassKg(this.vehicle);
+    const availablePowerW = this.vehicle.power * 745.7 * MASTER_PHYSICS.drivetrainEfficiency;
+    // Set drag from available wheel power at the vehicle's configured cruise
+    // target. This creates a power-versus-drag terminal speed instead of a
+    // direct velocity clamp.
+    const aeroCoefficient = availablePowerW / (massKg * Math.max(topSpeed ** 3, 1));
+
+    while (remaining > 1e-7) {
+      const step = Math.min(MASTER_PHYSICS.step, remaining);
+      remaining -= step;
+      this.flickLoad *= Math.exp(-step / 0.3);
+      this.handbrakeGripBlend = approach(this.handbrakeGripBlend, handbrake ? 1 : 0, step * (handbrake ? 8 : 2.8));
+      this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+      this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+
+      let longitudinal = this.velocity.dot(this.forward);
+      let lateral = this.velocity.dot(this.right);
+      speed = Math.hypot(longitudinal, lateral);
+      const wheelbase = Math.max(2, this.vehicle.length * 0.58);
+      const maxWheelAngle = Math.min(
+        this.vehicle.steering * 0.5,
+        Math.atan2(MASTER_PHYSICS.tireGrip * this.vehicle.handling * 9.81 * wheelbase * 0.82, Math.max(longitudinal * longitudinal, 1)),
+      );
+      const steeringTarget = steerInput * maxWheelAngle;
+      const steeringRate = steerInput === 0 ? MASTER_PHYSICS.steeringReturnRate : MASTER_PHYSICS.steeringRate;
+      this.frontWheelAngle = approach(this.frontWheelAngle, steeringTarget, steeringRate * step);
+
+      let driveAcceleration = 0;
+      if (gas && this.gear >= 1) {
+        const gearLimit = topSpeed * GEAR_SPEED[this.gear];
+        const engineHeadroom = THREE.MathUtils.clamp((gearLimit - Math.abs(longitudinal)) / Math.max(gearLimit * 0.18, 1), 0, 1);
+        const torqueLimitedAcceleration = this.vehicle.acceleration * GEAR_TORQUE[this.gear] * engineHeadroom;
+        const powerLimitedAcceleration = availablePowerW * engineHeadroom
+          / (massKg * Math.max(Math.abs(longitudinal), MASTER_PHYSICS.lowSpeedPowerReference));
+        driveAcceleration = Math.min(torqueLimitedAcceleration, powerLimitedAcceleration);
+      }
+      else if (gas && this.gear === -1) {
+        const reverseTorque = this.vehicle.acceleration * 0.48;
+        const reversePower = availablePowerW
+          / (massKg * Math.max(Math.abs(longitudinal), MASTER_PHYSICS.lowSpeedPowerReference));
+        driveAcceleration = -Math.min(reverseTorque, reversePower);
+      }
+
+      let brakeAcceleration = 0;
+      if (brake && Math.abs(longitudinal) > 0.1) {
+        brakeAcceleration = -Math.sign(longitudinal) * Math.min(this.vehicle.braking, Math.abs(longitudinal) / step);
+      }
+
+      const estimatedLongitudinalAcceleration = driveAcceleration + brakeAcceleration;
+      const weightShift = THREE.MathUtils.clamp(
+        (estimatedLongitudinalAcceleration * 0.55) / (wheelbase * 9.81),
+        -0.18,
+        0.18,
+      );
+      const frontLoad = THREE.MathUtils.clamp(MASTER_PHYSICS.frontLoad - weightShift, 0.32, 0.68);
+      const rearLoad = 1 - frontLoad;
+      const handlingGrip = MASTER_PHYSICS.tireGrip * this.vehicle.handling;
+      // VehicleSpec acceleration/braking are whole-car gameplay targets. The
+      // Usta branch drives the rear axle, so calibrate the shared tire budget
+      // against the rear load; a fixed 1.15 g cap clipped acceleration and
+      // braking before the configured vehicle values could be reached.
+      const longitudinalCapacity = Math.max(
+        handlingGrip * 9.81,
+        this.vehicle.acceleration / Math.max(rearLoad, 0.32),
+        this.vehicle.braking,
+      );
+      // A steering reversal briefly unloads rear grip. This affects only the
+      // tire response; engine torque and throttle calculations stay intact.
+      const rearGripScale = (1 - this.handbrakeGripBlend * 0.78) * (1 - this.flickLoad * 0.16);
+      const frontLongitudinalCapacity = longitudinalCapacity * frontLoad;
+      const rearLongitudinalCapacity = handlingGrip * 9.81 * rearLoad * rearGripScale;
+      const frontLateralCapacity = handlingGrip * 9.81 * frontLoad;
+      const rearLateralCapacity = handlingGrip * 9.81 * rearLoad * rearGripScale;
+
+      const rearAxle = wheelbase * (1 - 0.52);
+      const frontAxle = wheelbase - rearAxle;
+      const speedForSlip = Math.max(Math.abs(longitudinal), 0.75) * (longitudinal < 0 ? -1 : 1);
+      const forceBuild = THREE.MathUtils.clamp(speed / 3, 0, 1);
+      const frontSlip = Math.atan2(lateral + this.yawRate * frontAxle, speedForSlip) - this.frontWheelAngle;
+      const rearSlip = Math.atan2(lateral - this.yawRate * rearAxle, speedForSlip);
+      const frontLateralWheel = tireForceFromSlip(
+        frontSlip,
+        MASTER_PHYSICS.corneringStiffness * this.vehicle.handling * frontLoad * forceBuild,
+        frontLateralCapacity,
+      );
+      const rearLateralAtPeak = tireForceFromSlip(
+        rearSlip,
+        MASTER_PHYSICS.corneringStiffness * this.vehicle.handling * rearLoad * forceBuild,
+        rearLateralCapacity,
+      );
+      // Let the rear tires fall off their peak progressively at large slip
+      // angles, while the front tires retain the force needed for counter-steer.
+      const rearBreakaway = THREE.MathUtils.smoothstep(Math.abs(rearSlip), 0.2, 0.55);
+      const rearLateral = rearLateralAtPeak * (1 - rearBreakaway * 0.32);
+
+      const frontLongitudinalDemand = brakeAcceleration * 0.68;
+      const rearLongitudinalDemand = driveAcceleration + brakeAcceleration * 0.32;
+      const frontUse = Math.hypot(
+        frontLongitudinalDemand / Math.max(frontLongitudinalCapacity, 1e-4),
+        frontLateralWheel / Math.max(frontLateralCapacity, 1e-4),
+      );
+      const rearUse = Math.hypot(
+        rearLongitudinalDemand / Math.max(rearLongitudinalCapacity, 1e-4),
+        rearLateral / Math.max(rearLateralCapacity, 1e-4),
+      );
+      const frontScale = frontUse > 1 ? 1 / frontUse : 1;
+      const rearScale = rearUse > 1 ? 1 / rearUse : 1;
+      const frontLongitudinalWheel = frontLongitudinalDemand * frontScale;
+      const frontLateralWheelApplied = frontLateralWheel * frontScale;
+      // In Usta mode, rear tire saturation must not reduce engine throttle
+      // demand. Keep the rear brake contribution traction-limited, while
+      // allowing the configured drive acceleration through unchanged.
+      const rearLongitudinal = driveAcceleration + brakeAcceleration * 0.32 * rearScale;
+      const rearLateralApplied = rearLateral * rearScale;
+      const appliedDriveAcceleration = Math.max(0, Math.sign(driveAcceleration) * rearLongitudinal);
+      const wheelspinAcceleration = Math.max(0, Math.abs(driveAcceleration) - appliedDriveAcceleration);
+      const frontLongitudinal = frontLongitudinalWheel * Math.cos(this.frontWheelAngle)
+        - frontLateralWheelApplied * Math.sin(this.frontWheelAngle);
+      const frontLateral = frontLongitudinalWheel * Math.sin(this.frontWheelAngle)
+        + frontLateralWheelApplied * Math.cos(this.frontWheelAngle);
+
+      const aerodynamicDrag = aeroCoefficient * speed;
+      const rollingDrag = Math.abs(longitudinal) > 0.2 ? Math.sign(longitudinal) * MASTER_PHYSICS.rollingResistance : longitudinal / step;
+      const yawInertia = Math.max(1.8, (this.vehicle.length ** 2 + this.vehicle.width ** 2) * MASTER_PHYSICS.yawInertiaFactor);
+      const lowSpeedRotation = THREE.MathUtils.clamp(speed / 2.5, 0, 1);
+      const yawDamping = 0.55 + (1 - lowSpeedRotation) * 2.4;
+      const yawAcceleration = (frontAxle * frontLateral - rearAxle * rearLateralApplied)
+        / yawInertia * lowSpeedRotation
+        - this.yawRate * yawDamping;
+      const nextLongitudinal = longitudinal + (
+        frontLongitudinal + rearLongitudinal - aerodynamicDrag * longitudinal - rollingDrag
+        + lateral * this.yawRate
+      ) * step;
+      const nextLateral = lateral + (frontLateral + rearLateralApplied - longitudinal * this.yawRate - aerodynamicDrag * lateral) * step;
+      this.yawRate += yawAcceleration * step;
+      const nextSpeed = Math.hypot(nextLongitudinal, nextLateral);
+      // Prevent tire forces or residual yaw momentum from turning a nearly
+      // stationary car in place. The limit fades out by 2.5 m/s, leaving the
+      // normal-speed drift response and the engine torque curve untouched.
+      if (nextSpeed < 2.5) {
+        const lowSpeedYawLimit = nextSpeed * 0.36;
+        this.yawRate = THREE.MathUtils.clamp(this.yawRate, -lowSpeedYawLimit, lowSpeedYawLimit);
+      }
+      this.velocity.copy(this.forward).multiplyScalar(nextLongitudinal).addScaledVector(this.right, nextLateral);
+      this.yaw += this.yawRate * step;
+      this.carRoot.position.addScaledVector(this.velocity, step);
+      this.wheelTravel += nextLongitudinal * step;
+      this.rearWheelTravel += (nextLongitudinal
+        + Math.sign(driveAcceleration) * wheelspinAcceleration * step) * step;
+
+      slipAngle = Math.atan2(nextLateral, Math.max(Math.abs(nextLongitudinal), 0.75));
+      const drifting = speed > 6 && Math.abs(slipAngle) > 0.12 && Math.abs(nextLateral) > 1.25;
+      this.driftValue = drifting
+        ? Math.min(1, this.driftValue + step * (1 + THREE.MathUtils.clamp((Math.abs(slipAngle) - 0.12) / 0.6, 0, 1)))
+        : Math.max(0, this.driftValue - step * 2.4);
+    }
+
+    this.previousSteerInput = steerInput;
+    this.handleCollisions();
+    this.checkSpeedGates();
+    this.carRoot.rotation.y = this.yaw;
+    const sideSpeed = this.velocity.dot(this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw)));
+    speed = this.velocity.length();
+    slipAngle = Math.atan2(sideSpeed, Math.max(Math.abs(this.velocity.dot(this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)))), 0.75));
+    const drifting = speed > 6 && Math.abs(slipAngle) > 0.12 && Math.abs(sideSpeed) > 1.25;
+    this.carRoot.position.y = 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
+    this.updateSkids(drifting, Math.abs(slipAngle), speed);
+    setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel);
   }
 
   private checkSpeedGates(): void {
@@ -519,38 +817,102 @@ export class DriveEngine {
     }
   }
 
-  private updateSkids(dt: number, drifting: boolean): void {
-    if (!this.settings.effects || !drifting || Math.abs(this.velocity.dot(this.forward)) < 6) {
-      this.skidElapsed = 0;
+  private updateSkids(drifting: boolean, slipAngle: number, speed: number): void {
+    if (!this.settings.effects || !drifting || speed < 6) {
+      this.skidDistance = 0;
+      this.hasPreviousSkidPositions = false;
       return;
     }
-    this.skidElapsed += dt;
-    if (this.skidElapsed < 0.09) return;
-    this.skidElapsed = 0;
+    this.updateSkidWheelPositions();
+    if (!this.hasPreviousSkidPositions) {
+      this.skidPreviousPositions[0].copy(this.skidCurrentPositions[0]);
+      this.skidPreviousPositions[1].copy(this.skidCurrentPositions[1]);
+      this.hasPreviousSkidPositions = true;
+      return;
+    }
+
+    this.skidPreviousCenter.copy(this.skidPreviousPositions[0]).add(this.skidPreviousPositions[1]).multiplyScalar(0.5);
+    this.skidCurrentCenter.copy(this.skidCurrentPositions[0]).add(this.skidCurrentPositions[1]).multiplyScalar(0.5);
+    this.skidFrameTravel.copy(this.skidCurrentCenter).sub(this.skidPreviousCenter);
+    const frameDistance = this.skidFrameTravel.length();
+    const severity = THREE.MathUtils.clamp((slipAngle - 0.12) / 0.42, 0, 1);
+    const spacing = THREE.MathUtils.lerp(1.05, 0.62, severity);
+    this.skidDistance += frameDistance;
+    let addedMarks = false;
+    while (this.skidDistance >= spacing) {
+      const overshoot = this.skidDistance - spacing;
+      const t = frameDistance > 1e-5 ? THREE.MathUtils.clamp(1 - overshoot / frameDistance, 0, 1) : 1;
+      const markYaw = frameDistance > 1e-5 ? Math.atan2(this.skidFrameTravel.x, this.skidFrameTravel.z) : this.yaw;
+      const scaleX = 0.78 + severity * 0.55;
+      const scaleZ = THREE.MathUtils.clamp(spacing * 1.12 / 1.25, 0.5, 1.05);
+      for (let wheel = 0; wheel < 2; wheel += 1) {
+        this.skidInterpolatedPosition.copy(this.skidPreviousPositions[wheel]).lerp(this.skidCurrentPositions[wheel], t);
+        this.skidDummy.position.set(this.skidInterpolatedPosition.x, 0.024, this.skidInterpolatedPosition.z);
+        this.skidDummy.rotation.set(0, markYaw, 0);
+        this.skidDummy.scale.set(scaleX, 1, scaleZ);
+        this.skidDummy.updateMatrix();
+        this.skidMarks.setMatrixAt(this.skidIndex, this.skidDummy.matrix);
+        this.skidIndex = (this.skidIndex + 1) % DriveEngine.skidCapacity;
+        this.skidCount = Math.min(DriveEngine.skidCapacity, this.skidCount + 1);
+      }
+      this.skidDistance = overshoot;
+      addedMarks = true;
+    }
+    this.skidPreviousPositions[0].copy(this.skidCurrentPositions[0]);
+    this.skidPreviousPositions[1].copy(this.skidCurrentPositions[1]);
+    if (addedMarks) {
+      this.skidMarks.count = this.skidCount;
+      this.skidMarks.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  private updateSkidWheelPositions(): void {
+    if (!this.skidModelPositionsReady && this.visual.modelInstance && this.visual.modelWheels.length === 4) {
+      this.carRoot.updateMatrixWorld(true);
+      let rearIndex = 0;
+      for (const wheel of this.visual.modelWheels) {
+        if (wheel.isFront || rearIndex >= 2) continue;
+        wheel.node.getWorldPosition(this.skidCurrentPositions[rearIndex]);
+        this.carRoot.worldToLocal(this.skidCurrentPositions[rearIndex]);
+        this.skidModelLocalPositions[rearIndex].copy(this.skidCurrentPositions[rearIndex]);
+        rearIndex += 1;
+      }
+      if (rearIndex === 2) {
+        this.skidModelPositionsReady = true;
+        this.hasPreviousSkidPositions = false;
+        this.skidDistance = 0;
+      }
+    }
+
+    if (this.skidModelPositionsReady) {
+      for (let wheel = 0; wheel < 2; wheel += 1) {
+        this.skidCurrentPositions[wheel].copy(this.skidModelLocalPositions[wheel])
+          .applyQuaternion(this.carRoot.quaternion)
+          .add(this.carRoot.position);
+        this.skidCurrentPositions[wheel].y = 0.024;
+      }
+      return;
+    }
+
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    const back = -this.vehicle.length * 0.32;
-    for (const side of [-1, 1]) {
-      this.skidDummy.position.set(
-        this.carRoot.position.x + this.forward.x * back + this.right.x * side * this.vehicle.width * 0.32,
+    const rear = -this.vehicle.length * 0.31;
+    const halfTrack = this.vehicle.width * 0.51;
+    for (let wheel = 0; wheel < 2; wheel += 1) {
+      const side = wheel === 0 ? -1 : 1;
+      this.skidCurrentPositions[wheel].set(
+        this.carRoot.position.x + this.forward.x * rear + this.right.x * side * halfTrack,
         0.024,
-        this.carRoot.position.z + this.forward.z * back + this.right.z * side * this.vehicle.width * 0.32,
+        this.carRoot.position.z + this.forward.z * rear + this.right.z * side * halfTrack,
       );
-      this.skidDummy.rotation.set(0, this.yaw, 0);
-      this.skidDummy.scale.set(1, 1, 1);
-      this.skidDummy.updateMatrix();
-      this.skidMarks.setMatrixAt(this.skidIndex, this.skidDummy.matrix);
-      this.skidIndex = (this.skidIndex + 1) % DriveEngine.skidCapacity;
-      this.skidCount = Math.min(DriveEngine.skidCapacity, this.skidCount + 1);
     }
-    this.skidMarks.count = this.skidCount;
-    this.skidMarks.instanceMatrix.needsUpdate = true;
   }
 
   private clearSkids(): void {
     this.skidIndex = 0;
     this.skidCount = 0;
-    this.skidElapsed = 0;
+    this.skidDistance = 0;
+    this.hasPreviousSkidPositions = false;
     this.skidMarks.count = 0;
   }
 
