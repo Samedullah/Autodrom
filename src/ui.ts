@@ -24,6 +24,11 @@ export interface UiCallbacks {
 
 const money = new Intl.NumberFormat('tr-TR', { maximumFractionDigits: 0 });
 const percent = new Intl.NumberFormat('tr-TR', { maximumFractionDigits: 0 });
+const RECENT_VEHICLE_IDS = new Set([
+  'bmw-m2', 'bmw-m4-gts', 'bugatti-chiron-ss-300', 'koenigsegg-cc850', 'koenigsegg-regera',
+  'lamborghini-huracan-lbworks', 'mclaren-720s', 'mercedes-clk-gtr', 'pagani-zonda-cinque',
+  'porsche-carrera-gt', 'toyota-supra-a80', 'bmw-m3-e36-1993', 'bmw-m3-e92-lbworks-v2',
+]);
 
 export class GameInterface {
   private readonly callbacks: UiCallbacks;
@@ -309,6 +314,11 @@ export class GameInterface {
   }
 
   open(screen: Screen): void {
+    if (screen === 'store' && this.currentScreen !== 'store') {
+      this.category = 'ALL';
+      this.brandFilter = 'ALL';
+      this.modelSearch = '';
+    }
     this.currentScreen = screen;
     if (!screen) {
       this.destroyPreview();
@@ -401,7 +411,9 @@ export class GameInterface {
       const label = category === 'ALL' ? 'TÜMÜ' : CLASS_LABELS[category];
       return '<button class="' + (this.category === category ? 'active' : '') + '" data-action="filter-class" data-category="' + category + '">' + label + '</button>';
     }).join('') + '</div>';
-    const filtered = this.getFilteredVehicles(garageOnly);
+    const filtered = this.getFilteredVehicles(garageOnly).sort((a, b) =>
+      Number(RECENT_VEHICLE_IDS.has(b.id)) - Number(RECENT_VEHICLE_IDS.has(a.id)),
+    );
     const list = filtered.map((vehicle) => {
       const isOwned = owned.has(vehicle.id);
       const isActive = this.snapshot.save.activeVehicleId === vehicle.id;

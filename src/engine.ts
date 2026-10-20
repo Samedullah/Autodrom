@@ -110,6 +110,7 @@ export class DriveEngine {
   private telemetryElapsed = 0;
   private wheelTravel = 0;
   private rearWheelTravel = 0;
+  private burnoutWheelSpin = 0;
   private driftValue = 0;
   private readonly forward = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
@@ -133,6 +134,17 @@ export class DriveEngine {
   private skidCount = 0;
   private skidDistance = 0;
   private static readonly skidCapacity = 300;
+  private static readonly smokeCapacity = 56;
+  private readonly tireSmoke: THREE.Points;
+  private readonly smokePositions = new Float32Array(DriveEngine.smokeCapacity * 3);
+  private readonly smokeSizes = new Float32Array(DriveEngine.smokeCapacity);
+  private readonly smokeOpacities = new Float32Array(DriveEngine.smokeCapacity);
+  private readonly smokeAges = new Float32Array(DriveEngine.smokeCapacity).fill(-1);
+  private readonly smokeLifetimes = new Float32Array(DriveEngine.smokeCapacity);
+  private readonly smokeStrengths = new Float32Array(DriveEngine.smokeCapacity);
+  private readonly smokeVelocities = Array.from({ length: DriveEngine.smokeCapacity }, () => new THREE.Vector3());
+  private smokeIndex = 0;
+  private smokeEmitElapsed = 0;
   private readonly ambient: THREE.HemisphereLight;
   private readonly resizeObserver: ResizeObserver;
 
@@ -174,6 +186,38 @@ export class DriveEngine {
     this.skidMarks.frustumCulled = false;
     this.skidMarks.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.skidMarks);
+    const smokeGeometry = new THREE.BufferGeometry();
+    smokeGeometry.setAttribute('position', new THREE.BufferAttribute(this.smokePositions, 3).setUsage(THREE.DynamicDrawUsage));
+    smokeGeometry.setAttribute('aSize', new THREE.BufferAttribute(this.smokeSizes, 1).setUsage(THREE.DynamicDrawUsage));
+    smokeGeometry.setAttribute('aOpacity', new THREE.BufferAttribute(this.smokeOpacities, 1).setUsage(THREE.DynamicDrawUsage));
+    this.tireSmoke = new THREE.Points(smokeGeometry, new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      toneMapped: false,
+      vertexShader: `
+        attribute float aSize;
+        attribute float aOpacity;
+        varying float vOpacity;
+        void main() {
+          vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+          gl_Position = projectionMatrix * viewPosition;
+          gl_PointSize = clamp(aSize * (260.0 / max(-viewPosition.z, 0.1)), 2.0, 90.0);
+          vOpacity = aOpacity;
+        }
+      `,
+      fragmentShader: `
+        varying float vOpacity;
+        void main() {
+          float radius = length(gl_PointCoord - vec2(0.5)) * 2.0;
+          float softCloud = exp(-radius * radius * 4.2) * (1.0 - smoothstep(0.12, 1.0, radius));
+          gl_FragColor = vec4(vec3(0.70, 0.72, 0.70), softCloud * vOpacity);
+        }
+      `,
+    }));
+    this.tireSmoke.frustumCulled = false;
+    this.tireSmoke.renderOrder = 2;
+    this.tireSmoke.visible = this.settings.effects;
+    this.scene.add(this.tireSmoke);
     this.worldData = buildWorld(mapId, this.settings);
     this.scene.add(this.worldData.root);
     this.visual = createVehicleVisual(vehicle);
@@ -381,6 +425,7 @@ export class DriveEngine {
     this.velocity.set(0, 0, 0);
     this.wheelTravel = 0;
     this.rearWheelTravel = 0;
+    this.burnoutWheelSpin = 0;
     this.skidModelPositionsReady = false;
     this.incomeClock.reset();
     this.clearSkids();
@@ -416,6 +461,7 @@ export class DriveEngine {
       this.sun.shadow.mapSize.set(shadowResolution, shadowResolution);
     }
     this.skidMarks.visible = settings.effects;
+    this.tireSmoke.visible = settings.effects;
     if (!settings.effects) this.clearSkids();
     this.ambient.intensity = settings.quality === 'low' ? 1.7 : 2.15;
     this.sun.intensity = settings.quality === 'low' ? 2.4 : 3.1;
@@ -505,13 +551,13 @@ export class DriveEngine {
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     let longitudinal = this.velocity.dot(this.forward);
     let lateral = this.velocity.dot(this.right);
+    const burnout = gas && brake && this.velocity.length() < 1.15;
 
     if (brake) {
       if (Math.abs(longitudinal) > 0.33) {
         longitudinal = approach(longitudinal, 0, this.vehicle.braking * dt);
       } else {
-        this.gear = -1;
-        longitudinal = Math.max(-11, longitudinal - this.vehicle.acceleration * 0.42 * dt);
+        longitudinal = 0;
       }
     } else if (gas && this.gear >= 1) {
       const ratio = GEAR_SPEED[this.gear];
@@ -599,7 +645,13 @@ export class DriveEngine {
     this.carRoot.position.y = 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
     this.updateSkids(drifting, slipAngle, speed);
     this.wheelTravel += longitudinal * dt;
-    this.rearWheelTravel = this.wheelTravel;
+    this.burnoutWheelSpin = approach(
+      this.burnoutWheelSpin,
+      burnout ? (this.gear === -1 ? -18 : 18) : 0,
+      dt * 28,
+    );
+    this.rearWheelTravel += (longitudinal + this.burnoutWheelSpin) * dt;
+    this.updateTireSmoke(dt, burnout ? 1 : drifting ? driftSeverity : 0);
     setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel);
   }
 
@@ -608,6 +660,7 @@ export class DriveEngine {
     let remaining = dt;
     let speed = this.velocity.length();
     let slipAngle = 0;
+    let burnout = false;
     const steerReversal = this.previousSteerInput * steerInput < 0
       ? THREE.MathUtils.clamp(Math.abs(steerInput - this.previousSteerInput), 0, 1)
         * THREE.MathUtils.clamp(speed / 12, 0, 1)
@@ -632,6 +685,7 @@ export class DriveEngine {
       let longitudinal = this.velocity.dot(this.forward);
       let lateral = this.velocity.dot(this.right);
       speed = Math.hypot(longitudinal, lateral);
+      burnout = gas && brake && speed < 1.15;
       const wheelbase = Math.max(2, this.vehicle.length * 0.58);
       const maxWheelAngle = Math.min(
         this.vehicle.steering * 0.5,
@@ -743,11 +797,16 @@ export class DriveEngine {
       const yawAcceleration = (frontAxle * frontLateral - rearAxle * rearLateralApplied)
         / yawInertia * lowSpeedRotation
         - this.yawRate * yawDamping;
-      const nextLongitudinal = longitudinal + (
+      let nextLongitudinal = longitudinal + (
         frontLongitudinal + rearLongitudinal - aerodynamicDrag * longitudinal - rollingDrag
         + lateral * this.yawRate
       ) * step;
-      const nextLateral = lateral + (frontLateral + rearLateralApplied - longitudinal * this.yawRate - aerodynamicDrag * lateral) * step;
+      let nextLateral = lateral + (frontLateral + rearLateralApplied - longitudinal * this.yawRate - aerodynamicDrag * lateral) * step;
+      if (burnout) {
+        nextLongitudinal = 0;
+        nextLateral = 0;
+        this.yawRate = approach(this.yawRate, 0, step * 6);
+      }
       this.yawRate += yawAcceleration * step;
       const nextSpeed = Math.hypot(nextLongitudinal, nextLateral);
       // Prevent tire forces or residual yaw momentum from turning a nearly
@@ -761,8 +820,14 @@ export class DriveEngine {
       this.yaw += this.yawRate * step;
       this.carRoot.position.addScaledVector(this.velocity, step);
       this.wheelTravel += nextLongitudinal * step;
-      this.rearWheelTravel += (nextLongitudinal
-        + Math.sign(driveAcceleration) * wheelspinAcceleration * step) * step;
+      if (burnout) {
+        this.burnoutWheelSpin = approach(this.burnoutWheelSpin, this.gear === -1 ? -18 : 18, step * 28);
+        this.rearWheelTravel += (nextLongitudinal + this.burnoutWheelSpin) * step;
+      } else {
+        this.burnoutWheelSpin = approach(this.burnoutWheelSpin, 0, step * 28);
+        this.rearWheelTravel += (nextLongitudinal
+          + Math.sign(driveAcceleration) * wheelspinAcceleration * step) * step;
+      }
 
       slipAngle = Math.atan2(nextLateral, Math.max(Math.abs(nextLongitudinal), 0.75));
       const drifting = speed > 6 && Math.abs(slipAngle) > 0.12 && Math.abs(nextLateral) > 1.25;
@@ -781,6 +846,8 @@ export class DriveEngine {
     const drifting = speed > 6 && Math.abs(slipAngle) > 0.12 && Math.abs(sideSpeed) > 1.25;
     this.carRoot.position.y = 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
     this.updateSkids(drifting, Math.abs(slipAngle), speed);
+    const driftSmoke = drifting ? THREE.MathUtils.clamp((Math.abs(slipAngle) - 0.12) / 0.42, 0.18, 1) : 0;
+    this.updateTireSmoke(dt, burnout ? 1 : driftSmoke);
     setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel);
   }
 
@@ -864,6 +931,76 @@ export class DriveEngine {
       this.skidMarks.count = this.skidCount;
       this.skidMarks.instanceMatrix.needsUpdate = true;
     }
+  }
+
+  private updateTireSmoke(dt: number, intensity: number): void {
+    const canEmit = this.settings.effects && intensity > 0.08;
+    if (canEmit) {
+      this.updateSkidWheelPositions();
+      this.smokeEmitElapsed += dt;
+      while (this.smokeEmitElapsed >= 0.06) {
+        this.smokeEmitElapsed -= 0.06;
+        this.emitTireSmoke(0, intensity);
+        this.emitTireSmoke(1, intensity);
+      }
+    } else {
+      this.smokeEmitElapsed = 0;
+    }
+
+    for (let i = 0; i < DriveEngine.smokeCapacity; i += 1) {
+      const age = this.smokeAges[i];
+      if (age < 0) {
+        this.smokeOpacities[i] = 0;
+        this.smokeSizes[i] = 0;
+        continue;
+      }
+      const nextAge = age + dt;
+      if (nextAge >= this.smokeLifetimes[i]) {
+        this.smokeAges[i] = -1;
+        this.smokeOpacities[i] = 0;
+        this.smokeSizes[i] = 0;
+        continue;
+      }
+      this.smokeAges[i] = nextAge;
+      const fade = 1 - nextAge / this.smokeLifetimes[i];
+      const velocity = this.smokeVelocities[i];
+      this.smokePositions[i * 3] += velocity.x * dt;
+      this.smokePositions[i * 3 + 1] += velocity.y * dt;
+      this.smokePositions[i * 3 + 2] += velocity.z * dt;
+      velocity.y += 0.3 * dt;
+      velocity.x *= Math.exp(-0.22 * dt);
+      velocity.z *= Math.exp(-0.22 * dt);
+      this.smokeSizes[i] = 0.3 + nextAge * 0.75;
+      this.smokeOpacities[i] = this.smokeStrengths[i] * 0.48 * fade;
+    }
+
+    const geometry = this.tireSmoke.geometry;
+    (geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (geometry.getAttribute('aSize') as THREE.BufferAttribute).needsUpdate = true;
+    (geometry.getAttribute('aOpacity') as THREE.BufferAttribute).needsUpdate = true;
+    this.tireSmoke.visible = this.settings.effects;
+  }
+
+  private emitTireSmoke(wheel: 0 | 1, intensity: number): void {
+    const index = this.smokeIndex;
+    this.smokeIndex = (this.smokeIndex + 1) % DriveEngine.smokeCapacity;
+    const position = this.skidCurrentPositions[wheel];
+    const side = wheel === 0 ? -1 : 1;
+    const forwardX = Math.sin(this.yaw);
+    const forwardZ = Math.cos(this.yaw);
+    const rightX = Math.cos(this.yaw);
+    const rightZ = -Math.sin(this.yaw);
+    this.smokePositions[index * 3] = position.x + (Math.random() - 0.5) * 0.16;
+    this.smokePositions[index * 3 + 1] = position.y + 0.12;
+    this.smokePositions[index * 3 + 2] = position.z + (Math.random() - 0.5) * 0.16;
+    this.smokeAges[index] = 0;
+    this.smokeLifetimes[index] = 1.05 + Math.random() * 0.35;
+    this.smokeStrengths[index] = intensity;
+    this.smokeVelocities[index].set(
+      this.velocity.x * 0.12 - forwardX * (0.18 + Math.random() * 0.35) + rightX * side * (0.12 + Math.random() * 0.2),
+      0.42 + Math.random() * 0.35,
+      this.velocity.z * 0.12 - forwardZ * (0.18 + Math.random() * 0.35) + rightZ * side * (0.12 + Math.random() * 0.2),
+    );
   }
 
   private updateSkidWheelPositions(): void {

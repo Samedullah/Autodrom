@@ -1,11 +1,13 @@
 {
   "models": [
     "m3-e36",
+    "bmw-m3-e36-1993",
     "bmw-m3-gtr",
     "bmw-m3-csl-e46",
     "bmw-m3-e46-2005",
     "bmw-m3-e92-2008",
     "bmw-m3-e92-lbworks",
+    "bmw-m3-e92-lbworks-v2",
     "bmw-m3-e46-m2-motoring",
     "bmw-m4-duke-md4",
     "bmw-m4-competition-2025",
@@ -15,6 +17,17 @@
     "lamborghini-gallardo-lp560-4-spyder",
     "mercedes-slr-722-edition",
     "renault-megane-rs-250-cup",
-    "bugatti-la-voiture-noire"
+    "bugatti-la-voiture-noire",
+    "bmw-m2",
+    "bmw-m4-gts",
+    "bugatti-chiron-ss-300",
+    "koenigsegg-cc850",
+    "koenigsegg-regera",
+    "lamborghini-huracan-lbworks",
+    "mclaren-720s",
+    "mercedes-clk-gtr",
+    "pagani-zonda-cinque",
+    "porsche-carrera-gt",
+    "toyota-supra-a80"
   ]
 }

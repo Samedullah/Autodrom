@@ -363,7 +363,7 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
     instance.traverse((object) => {
       const nodeName = object.name || String(object.userData.name ?? '');
       // GLTFLoader turns spaces in some node names into underscores.
-      const isNamedWheel = /^(?:3dwheel[\s_]+(?:front|rear)[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL|BR|BL)_steer(?:\.001|001)?(?:\b|_))/i.test(nodeName);
+      const isNamedWheel = /^(?:3dwheel[\s_]+(?:front|rear)[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL|BR|BL)_steer(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:rear|front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
       if (!isNamedWheel) return;
       // GLTF nodes authored with a matrix keep matrixAutoUpdate disabled. Decompose
       // their existing pivot transform before changing quaternions each frame.
@@ -402,7 +402,7 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
           .applyQuaternion(parentRelativeQuaternion.invert())
           .normalize();
         const nodeName = node.name || String(node.userData.name ?? '');
-        const isFront = /^(?:3dwheel[\s_]+front[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL)_steer(?:\.001|001)?(?:\b|_))/i.test(nodeName);
+        const isFront = /^(?:3dwheel[\s_]+front[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL)_steer(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
         return { node, rest: node.quaternion.clone(), axis, steerAxis, isFront, radius, spinDirection };
       })
       : [];
