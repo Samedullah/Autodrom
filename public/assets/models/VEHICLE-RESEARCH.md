@@ -1,6 +1,6 @@
 # Araç modeli ve teknik veri notları
 
-Araştırma ve GLB envanteri tarihi: **20 Ekim 2026**. Araç kimlikleri, oyun fiyatları ve gerçek araç verileri tek katalogda tutulur: [`src/data.ts`](../../../src/data.ts). `price` oyun içi fiyatıdır; gerçek piyasa referansı varsa `realSpecs.turkeyPriceTry` alanında, ayrı not ve tarihle saklanır. Gerçek değerler sürüş fiziğine otomatik aktarılmaz.
+Araştırma ve GLB envanteri tarihi: **21 Ekim 2026**. Araç kimlikleri, oyun fiyatları ve gerçek araç verileri tek katalogda tutulur: [`src/data.ts`](../../../src/data.ts). `price` oyun içi fiyatıdır; gerçek piyasa referansı varsa `realSpecs.turkeyPriceTry` alanında, ayrı not ve tarihle saklanır. Gerçek değerler sürüş fiziğine otomatik aktarılmaz.
 
 ## Model eşleştirmesi ve GLB incelemesi
 
@@ -40,6 +40,20 @@ GLB sahneleri ve düğümleri incelendi. Altı modelde dört ayrı `3DWheel Fron
 | Pagani Zonda Cinque | `PAGANI/pagani_zonda_cinque.glb` | Dört tekerlek mesh grubu var; ayrı dönüş pivotu yok |
 | Porsche Carrera GT | `PORSCHE/porsche_carrera_gt_-_low_poly.glb` | Dört dönüş grubu (`Wheel-Rear_*`, `Wheel-Frount-*`); GLB'de “Frount” yazım hatası var |
 | Toyota Supra A80 | `TOYOTA/toyota_supra_a80_1993.glb` | İsimlendirilmiş tekerlek pivotu bulunamadı |
+| Audi RS 4 (B7 referansı) | `AUDI/audi_rs4.glb` | Dört rotation ve iki steer pivotu; dosya nesil/gövdeyi belirtmiyor |
+| BMW M3 F80 | `BMW/M3/f80_m3.glb` | Dört rotation ve iki steer pivotu; ön kaliper düğümleri mevcut |
+| Bugatti Vision Gran Turismo | `BUGATTI/bugatti_vision_gran_turismo.glb` | Dört rotation ve iki steer pivotu; sanal konsept |
+| Ferrari F12berlinetta | `FERRARI/ferrari_f12berlinetta.glb` | Dört rotation ve iki steer pivotu |
+| Ferrari LaFerrari | `FERRARI/ferrari_laferrari.glb` | Dört rotation ve iki steer pivotu |
+| Koenigsegg One:1 | `KOENIGGSEG/koenigsegg_one1.glb` | Dört rotation ve iki steer pivotu; ön kaliper düğümleri mevcut |
+| McLaren P1 GTR | `MCLAREN/mclaren_p1_gtr.glb` | Dört rotation ve iki steer pivotu |
+| Mercedes-Benz SLS AMG GT Final Edition | `MERCEDES/mercedes-benz_sls_amg_gt_coupe_final_edition.glb` | Dört rotation ve iki steer pivotu; ön kaliper düğümleri mevcut |
+| Mercedes-AMG GT3 (2016) | `MERCEDES/mercedes_benz_amg_gt3.glb` | Dört rotation ve iki steer pivotu |
+| Nissan 370Z | `NISSAN/nissan_370z.glb` | Dört rotation ve iki steer pivotu |
+| Nissan GT-R NISMO (2017) | `NISSAN/nissan_gt-r_nismo.glb` | Dört rotation ve iki steer pivotu; ön kaliper düğümleri mevcut |
+| Pagani Huayra | `PAGANI/pagani_huayra.glb` | Dört rotation ve iki steer pivotu; ön kaliper düğümleri mevcut |
+| Subaru Impreza WRX STI S206 NBR | `SUBARU/subaru_impreza_wrx_sti_s206_nbr.glb` | Dört rotation ve iki steer pivotu |
+| Volkswagen GTI Supersport VGT | `VOLSWAGEN/volkswagen_golf_vision_gti.glb` | Dört rotation ve iki steer pivotu; dijital konsept |
 
 Model yönü dosya yapısı ve adlandırılmış tekerlek pivotlarıyla kontrol edildi. Modeller kendi uzunluk ölçüsüne göre mevcut oyun ölçeğine uydurulur, yatayda ortalanır ve taban noktası zemine alınır. Bu işlem gerçek otomobil verisini veya sürüş parametrelerini değiştirmez. Mağaza kamerası model sınır kutusuna ve ekran oranına göre mesafesini ayarlar; aracın oranları esnetilmez.
 
@@ -72,6 +86,20 @@ Model yönü dosya yapısı ve adlandırılmış tekerlek pivotlarıyla kontrol 
 | `PAGANI_ZONDA_CINQUE` | [Pagani — Zonda Cinque](https://www.pagani.com/zonda-cinque/) | 7.3 L AMG V12, 678 CV, 780 Nm, 6 ileri sıralı, 1.210 kg kuru; üretim beş Coupé ile sınırlı |
 | `PORSCHE_CARRERA_GT` | [Porsche Newsroom — Carrera GT teknik verileri](https://newsroom.porsche.com/en_US/products/porsche-klassik-20-years-carrera-gt-22859.html) · [Porsche Museum teknik kartı](https://newsroom.porsche.com/en/press-kits/Porsche-Museum/Porsche-Carrera-GT.html) | 2003–2006; 5.733 cc V10, 612 PS, 590 Nm, RWD, 6 ileri manuel, 1.380 kg, 330 km/sa |
 | `TOYOTA_SUPRA_A80` | [Toyota Global — 1993 A80 Supra lansmanı](https://global.toyota/en/detail/7868203) | Japonya pazarı 2JZ-GTE turbo RZ/GZ referansı: 2.997 cc, 280 PS, 44,0 kgf·m (yaklaşık 431 Nm); turbo modellerde 6 ileri manuel veya otomatik seçeneği |
+| `AUDI_RS4_B7` | [Audi MediaCenter — 40 yıl Audi Sport](https://www.audi-mediacenter.com/de/highlights-aus-40-jahren-audi-sport-gmbh-15337/40-fakten-zu-40-jahren-audi-sport-gmbh-15657) · [Audi RS 4 B7 teknik föyü](https://www.ausmotive.com/downloads/Audi/RS4-Avant-press-kit-June2012.pdf) | 2006 B7 tabanı: 4.2 V8, 420 PS, 430 Nm, quattro; GLB nesil ve gövdeyi doğrulamıyor |
+| `BMW_F80` | [BMW PressClub — yeni BMW M3 Sedan ve M4 Coupé](https://www.press.bmwgroup.com/united-kingdom/article/detail/T0161084EN_GB/the-new-bmw-m3-saloon-and-bmw-m4-coupe?language=en_GB) | 2014 F80: 2.979 cc, 431 hp, 550 Nm; 6 ileri manuel veya 7 ileri DCT |
+| `BUGATTI_VISION_GT` | [Gran Turismo — Bugatti Vision Gran Turismo](https://www.gran-turismo.com/us/vgt/bugatti/) | Sanal konsept: 1.230 kW/1.650 HP, 1.580 Nm, AWD, hesaplanan 447,59 km/sa; üretim aracı teknik verisi değildir |
+| `FERRARI_F12` | [Ferrari N.V. 2016 Form 20-F](https://cdn.ferrari.com/cms/network/media/pdf/2016_12_31_-_ferrari_nv_20f_0.pdf) · [Ferrari N.V. 2015 Form 20-F](https://cdn.ferrari.com/cms/network/media/pdf/ferrari_nv_-_2015_20-f_feb_25_final_1_1.pdf) | 2012 F12berlinetta: 740 hp, 6.262 cc V12, 690 Nm; 705 Nm F12tdf sürümüne aittir |
+| `FERRARI_LAFERRARI` | [Ferrari — LaFerrari, ilk hibrit](https://www.ferrari.com/en-GR/history/moments/2013/extreme-innovation/more) · [Ferrari LaFerrari teknik bilgi](https://www.ferrarisouthbay.com/new-vehicles/la-ferrari) | HY-KERS toplam 963 CV, 900 Nm üzeri, 6.262 cc; V12 ayrı olarak 800 CV/700 Nm |
+| `KOENIGSEGG_ONE1` | [Koenigsegg — One:1 teknik özellikleri](https://www.koenigsegg.com/technical-specifications-one1) · [One:1 model sayfası](https://www.koenigsegg.com/model/one1) | 5,0 L, 1 MW/1.360 hp, 1.371 Nm, 1.360 kg, 7 ileri çift kavrama; üretici azami hız değeri yayımlamıyor |
+| `MCLAREN_P1_GTR` | [McLaren — P1 GTR](https://cars.mclaren.com/gl_en/ultimate-models/mclaren-p1-gtr) · [McLaren P1 GTR teknik el kitabı](https://mclaren-web.s3.eu-west-2.amazonaws.com/files/McLaren%20P1GTR%20-%2012Q0143RP01%20-%20Bookmark.pdf) | 1.000 PS (986 bhp); teknik el kitabı 800+200 PS ve 760+130 Nm motor ayrımını verir |
+| `MERCEDES_SLS_FINAL` | [Mercedes-Benz Media — SLS AMG GT Final Edition](https://media.mercedes-benz.it/nuova-sls-amg-gt-final-edition---instant-classic/) | 2013 tanıtım / 2014 satış; 6.208 cc, 591 CV, 650 Nm, 320 km/sa, 7 ileri DCT |
+| `MERCEDES_AMG_GT3` | [Mercedes-Benz Media — GT3 yarışına dönüş](https://media.mercedes-benz.com/article/aed94cae-cd9b-48bc-ae84-425e5e967a91) | 2016 GT3: 6,2 L V8, 404 kW/550 PS, arkada transaxle sıralı 6 ileri yarış şanzımanı; yarış ayarları gücü etkileyebilir |
+| `NISSAN_370Z` | [Nissan News — 2010 370Z Coupe basın dosyası](https://usa.nissannews.com/en-US/releases/us-2010-nissan-370z-coupe-press-kit?origin=channel-2730) · [Nissan News — 2011 Avrupa 370Z](https://europe.nissannews.com/en-GB/releases/release-79276) | 3.696 cc V6, Kuzey Amerika 332 hp veya Avrupa 331 PS, 366 Nm, RWD, 6MT/7AT |
+| `NISSAN_GTR_NISMO_2017` | [Nissan News — 2017 GT-R basın dosyası](https://usa.nissannews.com/en-US/releases/us-2017-nissan-gt-r-press-kit) · [2017 GT-R NISMO tanıtımı](https://usa.nissannews.com/en-US/releases/2017-nissan-gt-r-nismo-takes-the-new-gt-r-to-the-next-level?downloadUrl=%2Fen-US%2Freleases%2Frelease-721f68f00d3241c583c0a2726adc19dd%2Fdownload&la=1) | 3.799 cc VR38DETT, 600 hp, 481 lb-ft (652 Nm), AWD, 6 ileri çift kavrama |
+| `PAGANI_HUAYRA` | [Pagani — Huayra tanıtım](https://www.pagani.com/news/pagani-automobili-exclusive-event-in-the-middle-east/) · [Pagani Huayra teknik sayfası](https://www.pagani.com/it/huayra/) | 5.980 cc AMG V12, 730 PS, 1.000 Nm, 1.350 kg, 7 ileri sıralı, 370 km/sa |
+| `SUBARU_S206` | [STI — S206 resmi teknik özellikleri](https://www.sti.jp/en/roadcars/2011/s206.html) · [Subaru — S206 lansmanı](https://www.subaru.co.jp/en/news/archives/press/2011/11_11_24_2e.html) | 2011: 1.994 cc, 320 PS, 431 Nm, AWD, 6 ileri manuel, 1.470 kg; NBR paketi 100 adetle sınırlı |
+| `VW_GTI_SUPERSPORT_VGT` | [Gran Turismo — Volkswagen GTI Supersport Vision Gran Turismo](https://us.gran-turismo.com/gb/vgt/volkswagen_ss/) · [Volkswagen — GTI Supersport VGT](https://www.volkswagen.es/comunicacion/modelo/gti-supersport-vision-gran-turismo/) | Dijital konsept: 503 bhp VR6 TSI, 665 Nm, 7 ileri DSG ve 4MOTION AWD; üretim aracı değildir |
 
 Üretimi sona ermiş araçlar ve gövde kiti sürümleri için Türkiye'de aynı model yılı, kondisyon ve donanımı temsil eden doğrulanabilir bir tekil güncel fiyat bulunmadığından gerçek piyasa fiyatı alanı doldurulmadı. Sadece M4 Competition için erişilebilir 2026 Türkiye liste fiyatı ayrı bir **referans** alanında tutulur; 2025 model varlığının birebir fiyatı olarak sunulmaz. Oyun fiyatları bundan bağımsız, oyunun başlangıç bakiyesi ve araç sınıfına göre ayarlanmıştır.
 
