@@ -310,7 +310,7 @@ export const VEHICLES: VehicleSpec[] = [
     id: 'pagani-zonda-cinque', name: 'Pagani Zonda Cinque', shortName: 'ZONDA CINQUE', subtitle: 'Beş adet üretilen AMG V12 özel seri', brand: 'Pagani',
     category: 'SUPER', price: 3800000, maxSpeed: 350, acceleration: 29.4, braking: 26.2,
     handling: 0.99, steering: 1.53, power: 678, bodyStyle: 'super', bodyColor: '#b8b6ac',
-    length: 4.44, width: 2.02, height: 1.14, modelPath: '/assets/models/GLB/PAGANI/pagani_zonda_cinque.glb',
+    length: 4.44, width: 2.02, height: 1.14, modelPath: '/assets/models/GLB/PAGANI/pagani_zonda_cinque.glb',modelRotationY: Math.PI,
     realSpecs: { modelYear: 2009, powerHp: 678, engineDisplacementCc: 7291, torqueNm: 780, drive: 'RWD', weightKg: 1210, transmission: '6 ileri sıralı Cima', sourceIds: ['PAGANI_ZONDA_CINQUE'], note: 'Pagani fabrika sayfası gücü CV olarak verir; 1.210 kg sıvısız kuru ağırlıktır. Üretim beş Coupé ile sınırlıydı.' },
     starterChoice: false,
   },
@@ -336,7 +336,7 @@ export const VEHICLES: VehicleSpec[] = [
     handling: 0.97, steering: 1.47, power: 1479, bodyStyle: 'super', bodyColor: '#a7a9ad',
     length: 4.35, width: 1.90, height: 1.18,
     modelPath: '/assets/models/GLB/BUGATTI/bugatti_la_voiture_noire.glb', modelRotationY: 0,
-    realSpecs: { modelYear: 2019, powerHp: 1479, engineDisplacementCc: 7993, torqueNm: 1600, drive: 'AWD', transmission: '6 ileri manuel veya 6 ileri E-Gear', sourceIds: ['LAMBORGHINI_GALLARDO'], note: 'Admin koydu' }, starterChoice: false,
+    realSpecs: { modelYear: 2019, powerHp: 1479, engineDisplacementCc: 7993, torqueNm: 1600, drive: 'AWD', transmission: '6 ileri manuel veya 6 ileri E-Gear', sourceIds: ['bugatti-la-voiture-noire'], note: 'Admin koydu' }, starterChoice: false,
   },
 ];
 

@@ -18,8 +18,14 @@ export interface VehicleVisual {
     axis: THREE.Vector3;
     steerAxis: THREE.Vector3;
     isFront: boolean;
+    steerWithParent: boolean;
     radius: number;
     spinDirection: number;
+  }>;
+  modelSteeringNodes: Array<{
+    node: THREE.Object3D;
+    rest: THREE.Quaternion;
+    steerAxis: THREE.Vector3;
   }>;
   modelInstance: THREE.Object3D | null;
   releaseModel: (() => void) | null;
@@ -301,6 +307,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
     procedural,
     modelLoaded: false,
     modelWheels: [],
+    modelSteeringNodes: [],
     modelInstance: null,
     releaseModel: null,
     disposed: false,
@@ -360,16 +367,22 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
     // skeletons pointing at the cached source hierarchy, so clone bones too.
     const instance = cloneSkinnedModel(source);
     const wheelNodes: THREE.Object3D[] = [];
+    const steeringPivotNodes: THREE.Object3D[] = [];
+    const caliperNodes: THREE.Object3D[] = [];
     instance.traverse((object) => {
       const nodeName = object.name || String(object.userData.name ?? '');
       // GLTFLoader turns spaces in some node names into underscores.
-      const isNamedWheel = /^(?:3dwheel[\s_]+(?:front|rear)[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL|BR|BL)_steer(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:rear|front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
-      if (!isNamedWheel) return;
+      const isNamedWheel = /^(?:3dwheel[\s_]+(?:front|rear)[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL|BR|BL)_rotation(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:rear|front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
+      const isFrontSteeringPivot = /^bone_wheel_(?:FR|FL)_steer(?:\.\d+|\d+)?(?:\b|_)/i.test(nodeName);
+      const isFrontCaliper = /^bone_caliper_(?:FR|FL).{3}$/i.test(nodeName);
+      if (!isNamedWheel && !isFrontSteeringPivot && !isFrontCaliper) return;
       // GLTF nodes authored with a matrix keep matrixAutoUpdate disabled. Decompose
       // their existing pivot transform before changing quaternions each frame.
       object.matrix.decompose(object.position, object.quaternion, object.scale);
       object.matrixAutoUpdate = true;
-      wheelNodes.push(object);
+      if (isNamedWheel) wheelNodes.push(object);
+      if (isFrontSteeringPivot) steeringPivotNodes.push(object);
+      if (isFrontCaliper) caliperNodes.push(object);
     });
     cached.references += 1;
     visual.modelInstance = instance;
@@ -382,6 +395,18 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
     const rootInverseQuaternion = visual.root.getWorldQuaternion(new THREE.Quaternion()).invert();
     const forward = new THREE.Vector3(0, 0, 1);
     const down = new THREE.Vector3(0, -1, 0);
+    const hasSteeringPivotAncestor = (node: THREE.Object3D): boolean => {
+      let parent = node.parent;
+      while (parent && parent !== instance) {
+        if (steeringPivotNodes.includes(parent)) return true;
+        parent = parent.parent;
+      }
+      return false;
+    };
+    const steeringNodes = [
+      ...steeringPivotNodes,
+      ...caliperNodes.filter((node) => !hasSteeringPivotAncestor(node)),
+    ];
     visual.modelWheels = wheelNodes.length === 4
       ? wheelNodes.map((node) => {
         const bounds = getWheelLocalBounds(node);
@@ -402,10 +427,18 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
           .applyQuaternion(parentRelativeQuaternion.invert())
           .normalize();
         const nodeName = node.name || String(node.userData.name ?? '');
-        const isFront = /^(?:3dwheel[\s_]+front[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL)_steer(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
-        return { node, rest: node.quaternion.clone(), axis, steerAxis, isFront, radius, spinDirection };
+        const isFront = /^(?:3dwheel[\s_]+front[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL)_rotation(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
+        return { node, rest: node.quaternion.clone(), axis, steerAxis, isFront, steerWithParent: isFront && hasSteeringPivotAncestor(node), radius, spinDirection };
       })
       : [];
+    visual.modelSteeringNodes = steeringNodes.map((node) => {
+      const parentQuaternion = node.parent?.getWorldQuaternion(new THREE.Quaternion()) ?? new THREE.Quaternion();
+      const parentRelativeQuaternion = rootInverseQuaternion.clone().multiply(parentQuaternion);
+      const steerAxis = new THREE.Vector3(0, 1, 0)
+        .applyQuaternion(parentRelativeQuaternion.invert())
+        .normalize();
+      return { node, rest: node.quaternion.clone(), steerAxis };
+    });
     if (wheelNodes.length !== 4) {
       console.warn('Araçta 4 tekerlek pivotu bulunamadı:', spec.id, wheelNodes.map((node) => node.name));
     }
@@ -474,6 +507,7 @@ export function disposeVehicleVisual(visual: VehicleVisual): void {
   if (visual.modelInstance) visual.root.remove(visual.modelInstance);
   visual.modelInstance = null;
   visual.modelWheels = [];
+  visual.modelSteeringNodes = [];
   visual.releaseModel?.();
   visual.releaseModel = null;
   visual.root.clear();
@@ -491,11 +525,16 @@ export function setVehicleWheelSpin(visual: VehicleVisual, distance: number, ste
     const angle = wheelDistance / wheel.radius * wheel.spinDirection;
     visual.spinQuaternion.setFromAxisAngle(wheel.axis, angle);
     wheel.node.quaternion.copy(wheel.rest);
-    if (wheel.isFront) {
+    if (wheel.isFront && !wheel.steerWithParent) {
       visual.steerQuaternion.setFromAxisAngle(wheel.steerAxis, steeringAngle);
       wheel.node.quaternion.premultiply(visual.steerQuaternion);
     }
     wheel.node.quaternion.multiply(visual.spinQuaternion);
     wheel.node.updateMatrix();
+  }
+  for (const part of visual.modelSteeringNodes) {
+    visual.steerQuaternion.setFromAxisAngle(part.steerAxis, steeringAngle);
+    part.node.quaternion.copy(part.rest).premultiply(visual.steerQuaternion);
+    part.node.updateMatrix();
   }
 }
