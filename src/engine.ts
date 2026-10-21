@@ -584,13 +584,22 @@ export class DriveEngine {
     this.previousSteerInput = steerInput;
     const wheelbase = Math.max(2, this.vehicle.length * 0.58);
     const maxSteeringAngle = Math.min(0.78, this.vehicle.steering * 0.5);
-    // Preserve the game's existing A/D steering convention; smooth only the wheel animation.
+    // Preserve A/D steering direction; drift yaw follows this filtered wheel angle.
     const steeringTarget = steerInput * maxSteeringAngle;
-    this.frontWheelAngle = approach(this.frontWheelAngle, steeringTarget, (3.8 + 1.2 * this.driftModeBlend) * this.vehicle.handling * dt);
-    const steeringYawRate = longitudinal / wheelbase * Math.tan(steerInput * maxSteeringAngle);
+    const steeringReleased = Math.abs(steerInput) <= 0.05;
+    const steeringResponse = steeringReleased
+      ? THREE.MathUtils.lerp(3.8, 0.8, this.driftModeBlend)
+      : THREE.MathUtils.lerp(3.8, 2.8, this.driftModeBlend);
+    this.frontWheelAngle = approach(this.frontWheelAngle, steeringTarget, steeringResponse * this.vehicle.handling * dt);
+    const yawSteeringAngle = THREE.MathUtils.lerp(steeringTarget, this.frontWheelAngle, this.driftModeBlend);
+    const steeringYawRate = longitudinal / wheelbase * Math.tan(yawSteeringAngle);
 
     const normalLateralGrip = this.vehicle.handling * (steeringDemand < 0.05 ? 11.5 : 9.8);
-    const driftLateralGrip = this.vehicle.handling * Math.max(2.1, 5.1 - steeringDemand * 1.9 - (gas ? 0.65 : 0.25) + (brake ? 0.3 : 0));
+    // The old drift setting recovered lateral velocity in roughly 0.15–0.25 s,
+    // which made a lifted throttle feel like an invisible brake. Keep some
+    // stabilizing tire response, but let the car carry its slide long enough
+    // for throttle and counter-steer to shape it.
+    const driftLateralGrip = this.vehicle.handling * Math.max(1.15, 2.7 - steeringDemand * 0.9 - (gas ? 0.55 : 0.2) + (brake ? 0.35 : 0));
     let lateralRecovery = THREE.MathUtils.lerp(normalLateralGrip, driftLateralGrip, this.driftModeBlend);
     if (brake && speed > 7) {
       lateralRecovery *= 1 - 0.14 * THREE.MathUtils.clamp((speed - 7) / 16, 0, 1) * steeringDemand;
@@ -600,23 +609,44 @@ export class DriveEngine {
       const handbrakeGrip = this.vehicle.handling * THREE.MathUtils.lerp(2.25, 1.3, this.driftModeBlend);
       lateralRecovery = THREE.MathUtils.lerp(lateralRecovery, Math.min(lateralRecovery, handbrakeGrip), this.handbrakeGripBlend);
     }
+    // On a drift-mode coast with no steering/brake input, keep some sideways
+    // momentum. Counter-steer and braking retain their separate grip response.
+    if (steeringReleased && !brake && !handbrake) {
+      lateralRecovery *= THREE.MathUtils.lerp(1, 0.6, this.driftModeBlend);
+    }
     const counterSteering = Math.abs(lateral) > 0.1 && Math.abs(steerInput) > 0.05 && Math.sign(lateral) === Math.sign(steerInput);
-    if (counterSteering) lateralRecovery += this.vehicle.handling * (3.2 - 0.8 * this.driftModeBlend) * Math.abs(steerInput);
+    if (counterSteering) {
+      const counterSteerGrip = THREE.MathUtils.lerp(3.2, 0.2, this.driftModeBlend);
+      lateralRecovery += this.vehicle.handling * counterSteerGrip * Math.abs(steerInput);
+    }
 
-    const steeringReleased = Math.abs(steerInput) <= 0.05;
     const releaseYawAssist = steeringReleased ? 0.1 * (1 - this.driftModeBlend) : 0;
     const counterSteerYaw = counterSteering ? 0.1 * Math.abs(steerInput) : 0;
-    const slipYawRate = lateral / wheelbase * (0.12 + 0.28 * this.driftModeBlend + 0.12 * this.handbrakeGripBlend + releaseYawAssist + counterSteerYaw);
+    const driftSlipYaw = 0.12 + 0.14 * this.driftModeBlend;
+    const releasedSlipYaw = THREE.MathUtils.lerp(driftSlipYaw, 0.16, steeringReleased ? this.driftModeBlend : 0);
+    const driftCounterYaw = counterSteerYaw * (1 - 0.6 * this.driftModeBlend);
+    const slipYawRate = lateral / wheelbase * (
+      releasedSlipYaw + 0.12 * this.handbrakeGripBlend + releaseYawAssist + driftCounterYaw
+    );
     const handbrakeTurn = handbrake && speed > 5 && Math.abs(steerInput) > 0.05;
     const maximumYawRate = Math.min(
       handbrakeTurn ? 1.9 : 2.1 + 0.3 * this.driftModeBlend,
       this.vehicle.handling * (handbrakeTurn ? 30 : 40 + 5 * this.driftModeBlend) / Math.max(speed, 2.5),
     );
     const yawRateLimit = Math.min(2.4, maximumYawRate * (handbrakeTurn ? 1.5 : 1));
-    const targetYawRate = THREE.MathUtils.clamp(steeringYawRate + slipYawRate, -yawRateLimit, yawRateLimit);
+    const driftYawRateLimit = yawRateLimit * (1 + 0.25 * this.driftModeBlend);
+    const targetYawRate = THREE.MathUtils.clamp(steeringYawRate + slipYawRate, -driftYawRateLimit, driftYawRateLimit);
     const speedLoad = THREE.MathUtils.clamp(speed / 35, 0, 1);
-    const yawAcceleration = this.vehicle.handling * THREE.MathUtils.lerp(8, 4.8, speedLoad) * (1 + 0.15 * this.driftModeBlend);
-    this.yawRate = approach(this.yawRate, targetYawRate, yawAcceleration * dt);
+    const normalYawAcceleration = THREE.MathUtils.lerp(8, 4.8, speedLoad);
+    const driftYawAcceleration = THREE.MathUtils.lerp(4.4, 3.2, speedLoad);
+    const yawAcceleration = this.vehicle.handling * THREE.MathUtils.lerp(normalYawAcceleration, driftYawAcceleration, this.driftModeBlend);
+    const releasedYawAcceleration = this.vehicle.handling * 1.4;
+    const yawRateResponse = THREE.MathUtils.lerp(
+      yawAcceleration,
+      releasedYawAcceleration,
+      steeringReleased ? this.driftModeBlend : 0,
+    );
+    this.yawRate = approach(this.yawRate, targetYawRate, yawRateResponse * dt);
     this.yaw += this.yawRate * dt;
 
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
