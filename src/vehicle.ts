@@ -415,7 +415,19 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
         const axleIndex = dimensions.indexOf(Math.min(...dimensions));
         const axis = new THREE.Vector3().setComponent(axleIndex, 1);
         const diameters = dimensions.filter((_, index) => index !== axleIndex);
-        const radius = Math.max(0.1, (diameters[0] + diameters[1]) / 4);
+        // Bounds are expressed in the wheel pivot's local units. Include the
+        // scale of every ancestor (some GLBs put centimeter conversion on a
+        // wheel/steer pivot, not only on the model root) to get a world-space
+        // radius matching wheelTravel.
+        const localRadius = Math.max(0.001, (diameters[0] + diameters[1]) / 4);
+        const wheelWorldScale = node.getWorldScale(new THREE.Vector3());
+        const vehicleWorldScale = visual.root.getWorldScale(new THREE.Vector3());
+        wheelWorldScale.divide(vehicleWorldScale);
+        const radialScale = Math.sqrt(
+          wheelWorldScale.getComponent((axleIndex + 1) % 3)
+          * wheelWorldScale.getComponent((axleIndex + 2) % 3),
+        );
+        const radius = localRadius * radialScale;
         const rootRelativeQuaternion = rootInverseQuaternion.clone()
           .multiply(node.getWorldQuaternion(new THREE.Quaternion()));
         const axleInVehicle = axis.clone().applyQuaternion(rootRelativeQuaternion).normalize();
