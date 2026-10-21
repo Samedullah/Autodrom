@@ -403,6 +403,23 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
       }
       return false;
     };
+    // A few GLBs (including the F80 M3) export front calipers as siblings of
+    // the steering pivots. Rotating those calipers in place makes them drift
+    // away from the brake disc. Reparent them under the matching wheel pivot;
+    // attach() preserves their current world transform and makes them follow
+    // the wheel's steering motion as a fixed brake assembly.
+    for (const caliper of caliperNodes) {
+      if (hasSteeringPivotAncestor(caliper)) continue;
+      const caliperName = caliper.name || String(caliper.userData.name ?? '');
+      const side = caliperName.match(/^bone_caliper_(FR|FL)/i)?.[1]?.toUpperCase();
+      if (!side) continue;
+      const pivot = steeringPivotNodes.find((node) => {
+        const pivotName = node.name || String(node.userData.name ?? '');
+        return new RegExp(`^bone_wheel_${side}_steer`, 'i').test(pivotName);
+      });
+      if (pivot) pivot.attach(caliper);
+    }
+    instance.updateWorldMatrix(true, true);
     const steeringNodes = [
       ...steeringPivotNodes,
       ...caliperNodes.filter((node) => !hasSteeringPivotAncestor(node)),
