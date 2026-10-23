@@ -35,9 +35,23 @@ const allowedOrigins = process.env.CORS_ORIGIN
   ?.split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+// Capacitor's default Android WebView origin is https://localhost. Keep the
+// configured browser origins while allowing the packaged Android client too.
+const corsOrigins = allowedOrigins?.length
+  ? [...new Set([...allowedOrigins, 'https://localhost'])]
+  : true;
 const io = new Server(httpServer, {
-  cors: { origin: allowedOrigins?.length ? allowedOrigins : true },
+  cors: { origin: corsOrigins },
   maxHttpBufferSize: 16_384,
+});
+
+io.engine.on('connection_error', (error) => {
+  console.warn('[Socket.IO] Handshake error', {
+    code: error.code,
+    message: error.message,
+    origin: error.req.headers.origin,
+    transport: error.req._query.transport,
+  });
 });
 
 function cleanName(value) {
@@ -98,6 +112,18 @@ function joinSocket(socket, room, code, player, ack) {
 }
 
 io.on('connection', (socket) => {
+  console.info('[Socket.IO] Connected', {
+    id: socket.id,
+    origin: socket.handshake.headers.origin,
+    transport: socket.conn.transport.name,
+  });
+  socket.conn.on('upgrade', (transport) => {
+    console.info('[Socket.IO] Transport upgraded', {
+      id: socket.id,
+      origin: socket.handshake.headers.origin,
+      transport: transport.name,
+    });
+  });
   socket.data.roomCode = '';
   socket.on('room:create', (payload = {}, ack = () => undefined) => {
     removeFromRoom(socket);
@@ -138,7 +164,10 @@ io.on('connection', (socket) => {
     socket.to(code).volatile.emit('room:player-state', player);
   });
   socket.on('room:leave', () => removeFromRoom(socket));
-  socket.on('disconnect', () => removeFromRoom(socket));
+  socket.on('disconnect', (reason) => {
+    console.info('[Socket.IO] Disconnected', { id: socket.id, reason });
+    removeFromRoom(socket);
+  });
 });
 
 httpServer.listen(port, '0.0.0.0', () => {

@@ -1,5 +1,7 @@
 import type { Socket } from 'socket.io-client';
 
+const CONNECT_TIMEOUT_MS = 30_000;
+
 export interface MultiplayerPlayer {
   id: string;
   name: string;
@@ -98,11 +100,26 @@ export class MultiplayerClient {
     if (!socket.connected) {
       socket.connect();
       await new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(() => reject(new Error('Sunucu bağlantısı zaman aşımına uğradı.')), 7000);
-        socket.once('connect', () => { window.clearTimeout(timeout); resolve(); });
-        socket.once('connect_error', () => { window.clearTimeout(timeout); reject(new Error('Multiplayer sunucusuna ulaşılamıyor.')); });
+        const onConnect = (): void => {
+          window.clearTimeout(timeout);
+          socket.off('connect_error', onConnectError);
+          resolve();
+        };
+        const onConnectError = (error: Error): void => {
+          window.clearTimeout(timeout);
+          socket.off('connect', onConnect);
+          reject(error);
+        };
+        const timeout = window.setTimeout(() => {
+          socket.off('connect', onConnect);
+          socket.off('connect_error', onConnectError);
+          reject(new Error('Sunucu bağlantısı 30 saniyede kurulamadı.'));
+        }, CONNECT_TIMEOUT_MS);
+        socket.once('connect', onConnect);
+        socket.once('connect_error', onConnectError);
       }).catch((error: unknown) => {
-        this.setStatus(error instanceof Error ? error.message : 'Bağlantı kurulamadı.', false);
+        const message = error instanceof Error ? error.message : 'Bağlantı kurulamadı.';
+        this.setStatus(message, false);
       });
     }
     if (!socket.connected) return false;
@@ -135,21 +152,55 @@ export class MultiplayerClient {
       // start server/index.js. Point at a separately hosted Socket.IO server
       // when configured; local development and the bundled Node server remain
       // same-origin by default.
-      const socket = io(import.meta.env.VITE_MULTIPLAYER_URL || undefined, {
+      const multiplayerUrl = import.meta.env.VITE_MULTIPLAYER_URL || undefined;
+      const socket = io(multiplayerUrl, {
         autoConnect: false,
         reconnection: false,
+        timeout: CONNECT_TIMEOUT_MS,
       });
       this.socket = socket;
-      this.bindSocket(socket);
+      this.bindSocket(socket, multiplayerUrl);
       return socket;
     });
     return this.socketPromise;
   }
 
-  private bindSocket(socket: Socket): void {
-    socket.on('connect', () => this.setStatus('Sunucuya bağlandı, oda bekleniyor.', false));
-    socket.on('connect_error', () => this.setStatus('Multiplayer sunucusuna ulaşılamıyor.', false));
+  private bindSocket(socket: Socket, multiplayerUrl?: string): void {
+    const endpoint = multiplayerUrl || window.location.origin;
+    socket.on('connect', () => {
+      console.info('[Multiplayer] Connected', {
+        endpoint,
+        origin: window.location.origin,
+        path: socket.io.opts.path,
+        transport: socket.io.engine?.transport.name,
+      });
+      socket.io.engine?.on('upgrade', (transport) => {
+        console.info('[Multiplayer] Transport upgraded', {
+          endpoint,
+          origin: window.location.origin,
+          path: socket.io.opts.path,
+          transport: transport.name,
+        });
+      });
+      this.setStatus('Sunucuya bağlandı, oda bekleniyor.', false);
+    });
+    socket.on('connect_error', (error: Error) => {
+      const details = error as Error & { description?: unknown; context?: unknown };
+      console.error('[Multiplayer] connect_error', {
+        endpoint,
+        origin: window.location.origin,
+        path: socket.io.opts.path,
+        message: error.message,
+        description: details.description,
+        context: details.context,
+      });
+      this.setStatus('Multiplayer bağlantı hatası: ' + error.message, false);
+    });
     socket.on('disconnect', () => {
+      console.warn('[Multiplayer] Disconnected', {
+        endpoint,
+        origin: window.location.origin,
+      });
       this.room = '';
       this.playerId = '';
       this.players.clear();
