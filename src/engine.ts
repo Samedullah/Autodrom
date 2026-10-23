@@ -40,6 +40,12 @@ interface RemoteVehicle {
 
 const GEAR_SPEED = [0, 0.17, 0.31, 0.48, 0.66, 0.84, 1];
 const GEAR_TORQUE = [0, 1, 0.82, 0.68, 0.57, 0.49, 0.43];
+const GEAR_LAUNCH_SPEED_KMH = [0, 0, 0, 0, 20, 30, 40];
+const ACCELERATION_SCALE = 0.35;
+const DOWNSHIFT_SAFE_SPEED_FACTOR = 0.9;
+const AUTO_UPSHIFT_RPM = 6700;
+const AUTO_DOWNSHIFT_RPM = 2500;
+const SMOKE_EMIT_INTERVAL = 0.012;
 function pixelRatioLimit(quality: GameSettings['quality']): number {
   if (quality === 'ultra') return 2.25;
   if (quality === 'high') return 1.65;
@@ -127,7 +133,7 @@ export class DriveEngine {
   private skidCount = 0;
   private skidDistance = 0;
   private static readonly skidCapacity = 300;
-  private static readonly smokeCapacity = 56;
+  private static readonly smokeCapacity = 512;
   private readonly tireSmoke: THREE.Points;
   private readonly smokePositions = new Float32Array(DriveEngine.smokeCapacity * 3);
   private readonly smokeSizes = new Float32Array(DriveEngine.smokeCapacity);
@@ -407,11 +413,26 @@ export class DriveEngine {
   }
 
   shiftUp(): void {
+    if (this.settings.transmissionMode === 'automatic') return;
     this.gear = (this.gear === -1 ? 0 : Math.min(6, Math.max(1, this.gear + 1))) as Gear;
   }
 
   shiftDown(): void {
-    this.gear = (this.gear === 1 ? 0 : Math.max(-1, this.gear - 1)) as Gear;
+    if (this.settings.transmissionMode === 'automatic') return;
+    this.shiftDownIfSafe();
+  }
+
+  private shiftDownIfSafe(): boolean {
+    const nextGear = this.gear === 1 ? 0 : Math.max(-1, this.gear - 1) as Gear;
+    const speedKmh = this.velocity.length() * ECONOMY.kmhPerUnit;
+    if (nextGear > 0) {
+      const nextGearSpeedLimit = this.vehicle.maxSpeed * GEAR_SPEED[nextGear];
+      if (speedKmh > nextGearSpeedLimit * DOWNSHIFT_SAFE_SPEED_FACTOR) return false;
+    } else if (nextGear === -1 && speedKmh > 5) {
+      return false;
+    }
+    this.gear = nextGear;
+    return true;
   }
 
   setDrivingEnabled(enabled: boolean): void {
@@ -592,6 +613,7 @@ export class DriveEngine {
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     let longitudinal = this.velocity.dot(this.forward);
     let lateral = this.velocity.dot(this.right);
+    if (this.settings.transmissionMode === 'automatic') this.updateAutomaticTransmission(longitudinal, gas);
     const burnout = gas && brake && this.velocity.length() < 1.15;
     this.burnoutActive = burnout;
 
@@ -605,9 +627,13 @@ export class DriveEngine {
       const ratio = GEAR_SPEED[this.gear];
       const limit = this.vehicle.maxSpeed / ECONOMY.kmhPerUnit * ratio;
       const torque = GEAR_TORQUE[this.gear];
-      longitudinal = Math.min(limit, longitudinal + this.vehicle.acceleration * torque * dt);
+      const launchSpeed = GEAR_LAUNCH_SPEED_KMH[this.gear];
+      const launchTorque = launchSpeed > 0
+        ? THREE.MathUtils.smoothstep(Math.abs(longitudinal) * ECONOMY.kmhPerUnit, 0, launchSpeed)
+        : 1;
+      longitudinal = Math.min(limit, longitudinal + this.vehicle.acceleration * ACCELERATION_SCALE * torque * launchTorque * dt);
     } else if (gas && this.gear === -1) {
-      longitudinal = Math.max(-11, longitudinal - this.vehicle.acceleration * 0.48 * dt);
+      longitudinal = Math.max(-11, longitudinal - this.vehicle.acceleration * ACCELERATION_SCALE * 0.48 * dt);
     } else if (this.gear === 0) {
       longitudinal *= Math.exp(-0.08 * dt);
     } else {
@@ -676,7 +702,7 @@ export class DriveEngine {
       this.vehicle.handling * (handbrakeTurn ? 30 : 40 + 5 * this.driftModeBlend) / Math.max(speed, 2.5),
     );
     const yawRateLimit = Math.min(2.4, maximumYawRate * (handbrakeTurn ? 1.5 : 1));
-    const driftYawRateLimit = yawRateLimit * (1 + 0.25 * this.driftModeBlend);
+    const driftYawRateLimit = yawRateLimit * (1 + 0.65 * this.driftModeBlend);
     const targetYawRate = THREE.MathUtils.clamp(steeringYawRate + slipYawRate, -driftYawRateLimit, driftYawRateLimit);
     const speedLoad = THREE.MathUtils.clamp(speed / 35, 0, 1);
     const normalYawAcceleration = THREE.MathUtils.lerp(8, 4.8, speedLoad);
@@ -854,8 +880,8 @@ export class DriveEngine {
       setVehicleWheelSpin(remote.visual, remote.wheelTravel, remote.steeringAngle, remote.rearWheelTravel);
       if (target.burnout && this.settings.effects) {
         remote.smokeEmitElapsed += dt;
-        while (remote.smokeEmitElapsed >= 0.06) {
-          remote.smokeEmitElapsed -= 0.06;
+        while (remote.smokeEmitElapsed >= SMOKE_EMIT_INTERVAL) {
+          remote.smokeEmitElapsed -= SMOKE_EMIT_INTERVAL;
           this.emitRemoteTireSmoke(remote);
         }
       } else {
@@ -869,10 +895,11 @@ export class DriveEngine {
     if (canEmit) {
       this.updateSkidWheelPositions();
       this.smokeEmitElapsed += dt;
-      while (this.smokeEmitElapsed >= 0.06) {
-        this.smokeEmitElapsed -= 0.06;
-        this.emitTireSmoke(0, intensity);
-        this.emitTireSmoke(1, intensity);
+      while (this.smokeEmitElapsed >= SMOKE_EMIT_INTERVAL) {
+        this.smokeEmitElapsed -= SMOKE_EMIT_INTERVAL;
+        const smokeIntensity = Math.max(0.4, intensity);
+        this.emitTireSmoke(0, smokeIntensity);
+        this.emitTireSmoke(1, smokeIntensity);
       }
     } else {
       this.smokeEmitElapsed = 0;
@@ -901,8 +928,8 @@ export class DriveEngine {
       velocity.y += 0.3 * dt;
       velocity.x *= Math.exp(-0.22 * dt);
       velocity.z *= Math.exp(-0.22 * dt);
-      this.smokeSizes[i] = 0.3 + nextAge * 0.75;
-      this.smokeOpacities[i] = this.smokeStrengths[i] * 0.48 * fade;
+      this.smokeSizes[i] = 0.55 + nextAge * 1.3;
+      this.smokeOpacities[i] = this.smokeStrengths[i] * 0.78 * fade;
     }
 
     const geometry = this.tireSmoke.geometry;
@@ -925,7 +952,7 @@ export class DriveEngine {
     this.smokePositions[index * 3 + 1] = position.y + 0.12;
     this.smokePositions[index * 3 + 2] = position.z + (Math.random() - 0.5) * 0.16;
     this.smokeAges[index] = 0;
-    this.smokeLifetimes[index] = 1.05 + Math.random() * 0.35;
+    this.smokeLifetimes[index] = 1.8 + Math.random() * 0.55;
     this.smokeStrengths[index] = intensity;
     this.smokeVelocities[index].set(
       this.velocity.x * 0.12 - forwardX * (0.18 + Math.random() * 0.35) + rightX * side * (0.12 + Math.random() * 0.2),
@@ -951,7 +978,7 @@ export class DriveEngine {
       this.smokePositions[index * 3 + 1] = 0.14;
       this.smokePositions[index * 3 + 2] = remote.root.position.z + forwardZ * rear + rightZ * side * halfTrack + (Math.random() - 0.5) * 0.16;
       this.smokeAges[index] = 0;
-      this.smokeLifetimes[index] = 1.05 + Math.random() * 0.35;
+      this.smokeLifetimes[index] = 1.8 + Math.random() * 0.55;
       this.smokeStrengths[index] = 1;
       this.smokeSizes[index] = 0.3;
       this.smokeOpacities[index] = 0.48;
@@ -1074,12 +1101,30 @@ export class DriveEngine {
     return Math.max(0, this.velocity.dot(this.forward) * ECONOMY.kmhPerUnit);
   }
 
+  private updateAutomaticTransmission(longitudinal: number, gas: boolean): void {
+    if (this.gear < 1) {
+      this.gear = 1;
+      return;
+    }
+    const speedKmh = Math.abs(longitudinal) * ECONOMY.kmhPerUnit;
+    const rpm = this.rpmAtSpeed(speedKmh, this.gear);
+    if (gas && rpm >= AUTO_UPSHIFT_RPM && this.gear < 6) {
+      this.gear = (this.gear + 1) as Gear;
+    } else if (this.gear > 1 && rpm <= AUTO_DOWNSHIFT_RPM) {
+      this.shiftDownIfSafe();
+    }
+  }
+
+  private rpmAtSpeed(speedKmh: number, gear: Gear): number {
+    const gearIndex = Math.max(1, gear);
+    const gearSpeedLimit = gear > 0 ? this.vehicle.maxSpeed * GEAR_SPEED[gearIndex] : 36;
+    return Math.round(850 + Math.min(1, speedKmh / Math.max(gearSpeedLimit, 1)) * 6200);
+  }
+
   private makeTelemetry(): Telemetry {
     const signed = this.velocity.dot(this.forward);
     const speed = Math.abs(signed) * ECONOMY.kmhPerUnit;
-    const gearIndex = Math.max(1, this.gear);
-    const gearSpeedLimit = this.gear > 0 ? this.vehicle.maxSpeed * GEAR_SPEED[gearIndex] : 36;
-    const rpm = Math.round(850 + Math.min(1, speed / Math.max(gearSpeedLimit, 1)) * 6200);
+    const rpm = this.rpmAtSpeed(speed, this.gear);
     return { speedKmh: speed, gear: this.gear, rpm, drifting: this.driftValue > 0.2 };
   }
 

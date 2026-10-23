@@ -514,6 +514,14 @@ export const VEHICLES: VehicleSpec[] = [
     realSpecs: { modelYear: 2004, powerHp: 200, engineDisplacementCc: 1984, torqueNm: 280, drive: 'FWD', transmission: '6 ileri manuel veya DSG', sourceIds: ['VW_GOLF_V_GTI'] },
     starterChoice: false,
   },
+  {
+    id: 'volkswagen-golf-gti-mk7', name: 'Volkswagen Golf GTI Mk7', shortName: 'GOLF GTI MK7', subtitle: '220 PS turbo GTI ve önden çekiş', brand: 'Volkswagen',
+    category: 'SPORT', price: 185000, maxSpeed: 246, acceleration: 17.2, braking: 18.2,
+    handling: 0.91, steering: 1.34, power: 220, bodyStyle: 'hatch', bodyColor: '#e2e5e4',
+    length: 4.27, width: 1.80, height: 1.44, modelPath: '/assets/models/GLB/VOLSWAGEN/2014_volkswagen_golf_gti_mk7.glb',
+    realSpecs: { modelYear: 2014, powerHp: 220, engineDisplacementCc: 1984, torqueNm: 350, drive: 'FWD', transmission: '6 ileri manuel veya 6 ileri DSG', sourceIds: ['VW_GOLF_VII_GTI_2013_2017'], note: 'Standart 220 PS Mk7 GTI sürümü kullanıldı; Performance Pack 230 PS versiyonu ayrı donanımdır.' },
+    starterChoice: false,
+  },
 ];
 
 export const STARTER_VEHICLES = VEHICLES.filter((vehicle) => vehicle.starterChoice);

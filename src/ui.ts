@@ -28,7 +28,7 @@ const percent = new Intl.NumberFormat('tr-TR', { maximumFractionDigits: 0 });
 const RECENT_VEHICLE_IDS = new Set([
   'bmw-m2', 'bmw-m4-gts', 'bugatti-chiron-ss-300', 'koenigsegg-cc850', 'koenigsegg-regera',
   'lamborghini-huracan-lbworks', 'mclaren-720s', 'mercedes-clk-gtr', 'pagani-zonda-cinque',
-  'porsche-carrera-gt', 'porsche-911-gt3-rs', 'toyota-supra-a80', 'bmw-m3-e36-1993', 'bmw-m3-e92-lbworks-v2',
+  'porsche-carrera-gt', 'porsche-911-gt3-rs', 'toyota-supra-a80', 'volkswagen-golf-v', 'volkswagen-golf-gti-mk7', 'bmw-m3-e36-1993', 'bmw-m3-e92-lbworks-v2',
 ]);
 
 export class GameInterface {
@@ -208,6 +208,8 @@ export class GameInterface {
       settings.resolutionScale = Number(target.value) as GameSettings['resolutionScale'];
     } else if (key === 'fpsLimit') {
       settings.fpsLimit = Number(target.value) as GameSettings['fpsLimit'];
+    } else if (key === 'transmissionMode') {
+      settings.transmissionMode = target.value as GameSettings['transmissionMode'];
     }
     this.snapshot.settings = settings;
     this.callbacks.onSettings(settings);
@@ -541,6 +543,7 @@ export class GameInterface {
         '<label class="setting-row"><span><b>Kare hızı sınırı</b><small>Akıcılık ve güç tüketimi dengesi</small></span><select data-setting="fpsLimit"><option value="30"' + selected(settings.fpsLimit === 30) + '>30 FPS</option><option value="60"' + selected(settings.fpsLimit === 60) + '>60 FPS</option><option value="0"' + selected(settings.fpsLimit === 0) + '>Sınırsız</option></select></label>' +
         '<button class="setting-row fullscreen-row" data-action="fullscreen"><span><b>Tam ekran</b><small>Tarayıcının desteklediği ekran görünümü</small></span><i>↗</i></button>' +
       '</section><section class="settings-section"><div class="settings-section-head"><span>02</span><div><b>KAMERA & KONTROLLER</b><small>Takip hissini ve sürüşü ayarla</small></div></div>' +
+        '<label class="setting-row"><span><b>Vites sistemi</b><small>Otomatikte 6.700 dev/dak yükseltir, uygun devirde küçültür</small></span><select data-setting="transmissionMode"><option value="manual"' + selected(settings.transmissionMode === 'manual') + '>Manuel</option><option value="automatic"' + selected(settings.transmissionMode === 'automatic') + '>Otomatik</option></select></label>' +
         '<label class="setting-row range-row"><span><b>Kamera takibi</b><small>Yumuşak takip <strong data-camera-value>' + percent.format(settings.cameraFollow * 100) + '%</strong></small></span><input type="range" min="4" max="24" value="' + Math.round(settings.cameraFollow * 100) + '" data-setting="cameraFollow"></label>' +
         '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
       '</section></div><div class="settings-bottom"><span>AYARLAR BU TARAYICIDA KAYDEDİLİR</span><button class="button-primary compact" data-action="close"><span>UYGULA</span><b>✓</b></button></div></div>';
