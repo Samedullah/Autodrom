@@ -131,7 +131,14 @@ export class MultiplayerClient {
   private async getSocket(): Promise<Socket> {
     if (this.socket) return this.socket;
     this.socketPromise ??= import('socket.io-client').then(({ io }) => {
-      const socket = io({ autoConnect: false, reconnection: false });
+      // Production static hosting (for example Cloudflare Workers) does not
+      // start server/index.js. Point at a separately hosted Socket.IO server
+      // when configured; local development and the bundled Node server remain
+      // same-origin by default.
+      const socket = io(import.meta.env.VITE_MULTIPLAYER_URL || undefined, {
+        autoConnect: false,
+        reconnection: false,
+      });
       this.socket = socket;
       this.bindSocket(socket);
       return socket;

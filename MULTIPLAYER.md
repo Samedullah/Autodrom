@@ -16,8 +16,32 @@ of this MVP.
 The Vite development server forwards Socket.IO traffic to port 3001. For a
 production-style local run, run `npm run build` and then `npm run server`; the
 Node server serves `dist/` and the multiplayer endpoint from the same origin.
-Deployments must run this Node server (or provide an equivalent Socket.IO
-endpoint); static hosting alone cannot provide multiplayer rooms.
+## Cloudflare and other static deployments
+
+The browser connects to the same origin by default. That works for local
+development and when `npm run server` serves both the built game and Socket.IO.
+Cloudflare Workers/Pages static asset deployments do not start
+`server/index.js`; the Worker can serve the game while `/socket.io` has no
+Socket.IO server behind it. The `wrangler` package in this repository is only a
+development dependency: there is no Worker entry point or Wrangler deployment
+configuration here.
+
+For the smallest production setup, run `npm run server` on a persistent Node.js
+host (with the project's files and dependencies installed) and set
+`PORT` to the port provided by that host. Then set the build environment
+variable `VITE_MULTIPLAYER_URL` to the public HTTPS origin of that Node service,
+for example `https://autodrom-multiplayer.example.com`, when building the game
+for Cloudflare. Rebuild and redeploy the static game after setting it. Socket.IO
+uses its normal `/socket.io` path on that origin, including WebSocket upgrade.
+The host must allow inbound WebSocket traffic. Set `CORS_ORIGIN` on the Node
+host to the exact game origin (for example `https://autodrom.example.com`);
+multiple origins can be comma-separated. If unset, the server allows any
+origin, which is convenient for local development.
+
+Alternatively, replace the Node Socket.IO room server with a Cloudflare-native
+implementation using Durable Objects and WebSockets. That requires a separate
+server-side implementation of the room lifecycle and message protocol; simply
+deploying these static assets to Workers does not provide it.
 
 Room data is held in memory and disappears when the server restarts. The room
 server validates packet shape and bounds but does not authenticate users or

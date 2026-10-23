@@ -31,7 +31,14 @@ const httpServer = createServer((request, response) => {
   else createReadStream(file).pipe(response);
 });
 
-const io = new Server(httpServer, { cors: { origin: true }, maxHttpBufferSize: 16_384 });
+const allowedOrigins = process.env.CORS_ORIGIN
+  ?.split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const io = new Server(httpServer, {
+  cors: { origin: allowedOrigins?.length ? allowedOrigins : true },
+  maxHttpBufferSize: 16_384,
+});
 
 function cleanName(value) {
   return typeof value === 'string' ? value.replace(/[<>\u0000-\u001f]/g, '').trim().slice(0, 18) || 'Sürücü' : 'Sürücü';
