@@ -38,6 +38,16 @@ host to the exact game origin (for example `https://autodrom.example.com`);
 multiple origins can be comma-separated. If unset, the server allows any
 origin, which is convenient for local development.
 
+For a Render web service, use `npm ci && npm run build` as the build command
+and `npm start` as the start command. The start script launches this Node
+server; it binds to `0.0.0.0` and reads Render's `PORT`. In Render, set
+`CORS_ORIGIN` to the exact Cloudflare site origin, such as
+`https://autodrom.pages.dev` or your custom domain (scheme included, no path).
+In the Cloudflare build environment, set `VITE_MULTIPLAYER_URL` to the Render
+service origin, such as `https://autodrom-multiplayer.onrender.com`, then
+redeploy the game. These are different settings: CORS belongs on Render, while
+the client URL must be present when the frontend is built.
+
 Alternatively, replace the Node Socket.IO room server with a Cloudflare-native
 implementation using Durable Objects and WebSockets. That requires a separate
 server-side implementation of the room lifecycle and message protocol; simply
