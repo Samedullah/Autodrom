@@ -4,10 +4,11 @@ import type { GameSettings, SaveData } from './save';
 import type { DrivingControl, Telemetry } from './engine';
 import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel } from './vehicle';
 
-export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'pause' | 'store' | null;
+export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'pause' | 'store' | 'multiplayer' | null;
 export type UiAction = 'start' | 'continue' | 'starter' | 'garage' | 'store' | 'maps' | 'settings' | 'pause'
   | 'resume' | 'main' | 'select-starter' | 'buy' | 'activate' | 'choose-map' | 'close' | 'fullscreen' | 'reset-position'
-  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift' | 'toggle-usta';
+  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift'
+  | 'multiplayer' | 'multiplayer-create' | 'multiplayer-join' | 'multiplayer-leave' | 'copy-room';
 
 export interface UiSnapshot {
   save: SaveData;
@@ -17,7 +18,7 @@ export interface UiSnapshot {
 }
 
 export interface UiCallbacks {
-  onAction: (action: UiAction, id?: string) => void;
+  onAction: (action: UiAction, id?: string, payload?: { playerName?: string; roomCode?: string }) => void;
   onSettings: (settings: GameSettings) => void;
   onControl: (control: DrivingControl, pressed: boolean) => void;
 }
@@ -27,7 +28,7 @@ const percent = new Intl.NumberFormat('tr-TR', { maximumFractionDigits: 0 });
 const RECENT_VEHICLE_IDS = new Set([
   'bmw-m2', 'bmw-m4-gts', 'bugatti-chiron-ss-300', 'koenigsegg-cc850', 'koenigsegg-regera',
   'lamborghini-huracan-lbworks', 'mclaren-720s', 'mercedes-clk-gtr', 'pagani-zonda-cinque',
-  'porsche-carrera-gt', 'toyota-supra-a80', 'bmw-m3-e36-1993', 'bmw-m3-e92-lbworks-v2',
+  'porsche-carrera-gt', 'porsche-911-gt3-rs', 'toyota-supra-a80', 'volkswagen-golf-v', 'volkswagen-golf-gti-mk7', 'bmw-m3-e36-1993', 'bmw-m3-e92-lbworks-v2',
 ]);
 
 export class GameInterface {
@@ -47,7 +48,6 @@ export class GameInterface {
   private readonly rpmRing: HTMLElement;
   private readonly driftBadge: HTMLElement;
   private readonly driftModeButton: HTMLButtonElement;
-  private readonly masterModeButton: HTMLButtonElement;
   private readonly cashValue: HTMLElement;
   private readonly mapValue: HTMLElement;
   private readonly incomeToast: HTMLElement;
@@ -59,6 +59,11 @@ export class GameInterface {
   private readonly devCodeStatus: HTMLElement;
   private readonly activeTouchPointers = new Map<number, DrivingControl>();
   private incomeHideTimeout = 0;
+  private multiplayerStatus = 'Oda kur veya arkadaşının koduyla katıl.';
+  private multiplayerConnected = false;
+  private multiplayerRoomCode = '';
+  private multiplayerPlayerCount = 1;
+  private multiplayerName = 'Sürücü';
 
   constructor(host: HTMLElement, snapshot: UiSnapshot, callbacks: UiCallbacks) {
     this.snapshot = snapshot;
@@ -67,7 +72,7 @@ export class GameInterface {
       '<header class="topbar">' +
         '<div class="brand-lockup"><span class="brand-mark">A</span><span><b>AUTODROM</b><small>DRIVE&nbsp; / &nbsp;BUILD</small></span></div>' +
         '<div class="cash-card"><span class="cash-label">GARAJ BAKİYESİ</span><strong id="cash-value">₺10.000</strong><i class="cash-dot"></i></div>' +
-        '<div class="top-meta"><span class="live-chip"><i></i> CANLI SÜRÜŞ</span><span class="map-pill" id="map-value">ŞEHİR İÇİ</span><button class="drift-mode-toggle" type="button" data-action="toggle-drift" aria-label="Drift modunu aç" aria-pressed="false"><span>DRIFT</span><b>KAPALI</b></button><button class="master-mode-toggle" type="button" data-action="toggle-usta" aria-label="Usta Modunu aç" aria-pressed="false"><span>USTA</span><b>KAPALI</b></button><button class="icon-button pause-button" data-action="pause" aria-label="Oyunu duraklat">Ⅱ</button></div>' +
+        '<div class="top-meta"><span class="live-chip"><i></i> CANLI SÜRÜŞ</span><span class="map-pill" id="map-value">ŞEHİR İÇİ</span><button class="multiplayer-toggle" type="button" data-action="multiplayer" aria-label="Multiplayer odaları">ONLINE</button><button class="drift-mode-toggle" type="button" data-action="toggle-drift" aria-label="Drift modunu aç" aria-pressed="false"><span>DRIFT</span><b>KAPALI</b></button><button class="icon-button pause-button" data-action="pause" aria-label="Oyunu duraklat">Ⅱ</button></div>' +
       '</header>' +
       '<nav class="side-rail" aria-label="Oyun menüsü">' +
         '<button class="rail-button" data-action="store" aria-label="Araç mağazası"><span>◈</span><small>MAĞAZA</small></button>' +
@@ -109,7 +114,6 @@ export class GameInterface {
     this.rpmRing = host.querySelector('#rpm-ring') as HTMLElement;
     this.driftBadge = host.querySelector('#drift-indicator') as HTMLElement;
     this.driftModeButton = host.querySelector('.drift-mode-toggle') as HTMLButtonElement;
-    this.masterModeButton = host.querySelector('.master-mode-toggle') as HTMLButtonElement;
     this.cashValue = host.querySelector('#cash-value') as HTMLElement;
     this.mapValue = host.querySelector('#map-value') as HTMLElement;
     this.incomeToast = host.querySelector('#income-toast') as HTMLElement;
@@ -141,6 +145,14 @@ export class GameInterface {
       if (action === 'preview-car' && id) {
         this.selectedVehicleId = id;
         this.renderScreen();
+        return;
+      }
+      if (action === 'multiplayer-create' || action === 'multiplayer-join') {
+        const playerName = this.modalHost.querySelector<HTMLInputElement>('[data-player-name]')?.value.trim() || 'Sürücü';
+        const roomCode = this.modalHost.querySelector<HTMLInputElement>('[data-room-code]')?.value.trim().toUpperCase();
+        this.multiplayerName = playerName.slice(0, 18) || 'Sürücü';
+        try { localStorage.setItem('autodrom.multiplayer.name', this.multiplayerName); } catch { /* storage may be unavailable */ }
+        this.callbacks.onAction(action, undefined, { playerName, roomCode });
         return;
       }
       if (action === 'filter-class') {
@@ -192,8 +204,12 @@ export class GameInterface {
       if (key === 'cameraFollow') settings.cameraFollow = Number(target.value) / 100;
     } else if (key === 'quality') {
       settings.quality = target.value as GameSettings['quality'];
+    } else if (key === 'resolutionScale') {
+      settings.resolutionScale = Number(target.value) as GameSettings['resolutionScale'];
     } else if (key === 'fpsLimit') {
       settings.fpsLimit = Number(target.value) as GameSettings['fpsLimit'];
+    } else if (key === 'transmissionMode') {
+      settings.transmissionMode = target.value as GameSettings['transmissionMode'];
     }
     this.snapshot.settings = settings;
     this.callbacks.onSettings(settings);
@@ -266,11 +282,21 @@ export class GameInterface {
     this.driftModeButton.querySelector('b')!.textContent = enabled ? 'AÇIK' : 'KAPALI';
   }
 
-  setMasterModeEnabled(enabled: boolean): void {
-    this.masterModeButton.classList.toggle('active', enabled);
-    this.masterModeButton.setAttribute('aria-pressed', String(enabled));
-    this.masterModeButton.setAttribute('aria-label', enabled ? 'Usta Modunu kapat' : 'Usta Modunu aç');
-    this.masterModeButton.querySelector('b')!.textContent = enabled ? 'AÇIK' : 'KAPALI';
+  setMultiplayerInfo(status: string, connected: boolean, roomCode = '', playerCount = 1): void {
+    const shouldRerender = status !== this.multiplayerStatus
+      || connected !== this.multiplayerConnected
+      || roomCode !== this.multiplayerRoomCode;
+    this.multiplayerStatus = status;
+    this.multiplayerConnected = connected;
+    this.multiplayerRoomCode = roomCode;
+    this.multiplayerPlayerCount = playerCount;
+    if (this.currentScreen !== 'multiplayer') return;
+    if (shouldRerender) {
+      this.renderScreen();
+      return;
+    }
+    const count = this.modalHost.querySelector<HTMLElement>('.multiplayer-room > small');
+    if (count) count.textContent = this.multiplayerPlayerCount + ' / 8 oyuncu';
   }
 
   showIncome(amount: number): void {
@@ -353,6 +379,7 @@ export class GameInterface {
     if (screen === 'store') return this.storeMenu(false);
     if (screen === 'garage') return this.storeMenu(true);
     if (screen === 'maps') return this.mapMenu(false);
+    if (screen === 'multiplayer') return this.multiplayerMenu();
     if (screen === 'settings') return this.settingsMenu(false);
     return this.pauseMenu();
   }
@@ -510,11 +537,13 @@ export class GameInterface {
     return '<div class="modal-shell centered-modal settings-modal"><div class="panel-topline"><div><div class="eyebrow">SÜRÜŞÜNÜ KİŞİSELLEŞTİR</div><h2>Ayarlar</h2></div><button class="close-button" data-action="' + (inGame || this.snapshot.save.starterChosen ? 'close' : 'main') + '">×</button></div>' +
       '<div class="settings-grid"><section class="settings-section"><div class="settings-section-head"><span>01</span><div><b>GRAFİK</b><small>Görsel kalite ve performans</small></div></div>' +
         '<label class="setting-row"><span><b>Görüntü kalitesi</b><small>Doku, gölge ve çizim uzaklığı</small></span><select data-setting="quality"><option value="low"' + selected(settings.quality === 'low') + '>Düşük</option><option value="medium"' + selected(settings.quality === 'medium') + '>Orta</option><option value="high"' + selected(settings.quality === 'high') + '>Yüksek</option><option value="ultra"' + selected(settings.quality === 'ultra') + '>Aşırı Yüksek</option></select></label>' +
+        '<label class="setting-row"><span><b>Çözünürlük ölçeği</b><small>Düşük ölçek FPS’i artırabilir</small></span><select data-setting="resolutionScale"><option value="0.5"' + selected(settings.resolutionScale === 0.5) + '>%50</option><option value="0.7"' + selected(settings.resolutionScale === 0.7) + '>%70</option><option value="0.85"' + selected(settings.resolutionScale === 0.85) + '>%85</option><option value="1"' + selected(settings.resolutionScale === 1) + '>%100</option></select></label>' +
         '<label class="setting-row"><span><b>Yumuşak gölgeler</b><small>Gölge haritasını açıp kapat</small></span><input type="checkbox" data-setting="shadows"' + checked(settings.shadows) + '></label>' +
         '<label class="setting-row"><span><b>Drift izleri</b><small>Sürüş efektlerini göster</small></span><input type="checkbox" data-setting="effects"' + checked(settings.effects) + '></label>' +
         '<label class="setting-row"><span><b>Kare hızı sınırı</b><small>Akıcılık ve güç tüketimi dengesi</small></span><select data-setting="fpsLimit"><option value="30"' + selected(settings.fpsLimit === 30) + '>30 FPS</option><option value="60"' + selected(settings.fpsLimit === 60) + '>60 FPS</option><option value="0"' + selected(settings.fpsLimit === 0) + '>Sınırsız</option></select></label>' +
         '<button class="setting-row fullscreen-row" data-action="fullscreen"><span><b>Tam ekran</b><small>Tarayıcının desteklediği ekran görünümü</small></span><i>↗</i></button>' +
       '</section><section class="settings-section"><div class="settings-section-head"><span>02</span><div><b>KAMERA & KONTROLLER</b><small>Takip hissini ve sürüşü ayarla</small></div></div>' +
+        '<label class="setting-row"><span><b>Vites sistemi</b><small>Otomatikte 6.700 dev/dak yükseltir, uygun devirde küçültür</small></span><select data-setting="transmissionMode"><option value="manual"' + selected(settings.transmissionMode === 'manual') + '>Manuel</option><option value="automatic"' + selected(settings.transmissionMode === 'automatic') + '>Otomatik</option></select></label>' +
         '<label class="setting-row range-row"><span><b>Kamera takibi</b><small>Yumuşak takip <strong data-camera-value>' + percent.format(settings.cameraFollow * 100) + '%</strong></small></span><input type="range" min="4" max="24" value="' + Math.round(settings.cameraFollow * 100) + '" data-setting="cameraFollow"></label>' +
         '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
       '</section></div><div class="settings-bottom"><span>AYARLAR BU TARAYICIDA KAYDEDİLİR</span><button class="button-primary compact" data-action="close"><span>UYGULA</span><b>✓</b></button></div></div>';
@@ -525,6 +554,21 @@ export class GameInterface {
       '<button class="button-primary full" data-action="resume"><span>SÜRÜŞE DÖN</span><b>↗</b></button>' +
       '<div class="pause-actions"><button data-action="store">ARAÇ MAĞAZASI <i>◈</i></button><button data-action="garage">GARAJIM <i>▣</i></button><button data-action="maps">HARİTA SEÇ <i>⌖</i></button><button data-action="settings">AYARLAR <i>⚙</i></button></div>' +
       '<button class="return-menu" data-action="main">ANA MENÜYE DÖN <span>↗</span></button></div><div class="pause-side"><span>AKTİF ARAÇ</span><b>' + escapeHtml(this.snapshot.activeVehicle.name) + '</b><i>' + MAP_LABELS[this.snapshot.map].toLocaleUpperCase('tr-TR') + ' · ₺' + money.format(this.snapshot.save.cash) + '</i></div></div>';
+  }
+
+  private multiplayerMenu(): string {
+    const room = this.multiplayerRoomCode;
+    return '<div class="modal-shell centered-modal multiplayer-modal"><div class="panel-topline"><div><div class="eyebrow">ÇEVRİM İÇİ SÜRÜŞ</div><h2>Arkadaşlarınla sür</h2></div><button class="close-button" data-action="close" aria-label="Kapat">×</button></div>' +
+      '<p class="modal-description">Oda kur, altı haneli kodu arkadaşına gönder ve aynı yolda buluş.</p>' +
+      '<label class="multiplayer-field"><span>SÜRÜCÜ ADI</span><input data-player-name maxlength="18" value="' + escapeHtml(this.multiplayerName) + '" autocomplete="nickname"></label>' +
+      (this.multiplayerConnected
+        ? '<div class="multiplayer-room"><span>ODA KODU</span><b>' + escapeHtml(room) + '</b><small>' + this.multiplayerPlayerCount + ' / 8 oyuncu</small><button class="button-secondary" data-action="copy-room">KODU KOPYALA</button></div>'
+        : '<label class="multiplayer-field"><span>ARKADAŞININ ODA KODU</span><input data-room-code maxlength="6" placeholder="ABC123" autocomplete="off"></label>') +
+      '<div class="multiplayer-status' + (this.multiplayerConnected ? ' connected' : '') + '" role="status">' + escapeHtml(this.multiplayerStatus) + '</div>' +
+      (this.multiplayerConnected
+        ? '<button class="button-secondary multiplayer-leave" data-action="multiplayer-leave">ODADAN AYRIL</button>'
+        : '<div class="multiplayer-actions"><button class="button-primary" data-action="multiplayer-create"><span>ODA KUR</span><b>↗</b></button><button class="button-secondary" data-action="multiplayer-join">KODA KATIL</button></div>') +
+      '</div>';
   }
 
   private destroyPreview(): void {
@@ -541,6 +585,8 @@ class PreviewStage {
   private readonly observer: ResizeObserver;
   private frameId = 0;
   private angle = -0.28;
+  private lastFrameTime = 0;
+  private lastRenderTime = 0;
   private dragging = false;
   private lastX = 0;
 
@@ -625,10 +671,15 @@ class PreviewStage {
     this.camera.lookAt(sphere.center.x, sphere.center.y + sphere.radius * 0.02, sphere.center.z);
   }
 
-  private frame = (): void => {
-    if (!this.dragging) this.angle += 0.001;
-    this.visual.root.rotation.y = this.angle;
-    this.renderer.render(this.scene, this.camera);
+  private frame = (time: number): void => {
+    const elapsed = this.lastFrameTime ? Math.min((time - this.lastFrameTime) / 1000, 0.1) : 0;
+    this.lastFrameTime = time;
+    if (!this.dragging) this.angle += elapsed * 0.06;
+    if (time - this.lastRenderTime >= 1000 / 30) {
+      this.visual.root.rotation.y = this.angle;
+      this.renderer.render(this.scene, this.camera);
+      this.lastRenderTime = time;
+    }
     this.frameId = requestAnimationFrame(this.frame);
   };
 
