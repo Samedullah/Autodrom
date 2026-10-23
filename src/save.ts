@@ -20,6 +20,7 @@ export interface SaveData {
 
 export interface GameSettings {
   quality: 'low' | 'medium' | 'high' | 'ultra';
+  resolutionScale: 0.5 | 0.7 | 0.85 | 1;
   shadows: boolean;
   effects: boolean;
   cameraFollow: number;
@@ -27,7 +28,7 @@ export interface GameSettings {
 }
 
 export const DEFAULT_SETTINGS: GameSettings = {
-  quality: 'high', shadows: true, effects: true, cameraFollow: 0.12, fpsLimit: 60,
+  quality: 'high', resolutionScale: 1, shadows: true, effects: true, cameraFollow: 0.12, fpsLimit: 60,
 };
 
 export function createDefaultSave(): SaveData {
@@ -71,9 +72,13 @@ export function loadSettings(): GameSettings {
   const raw = readObject(SETTINGS_KEY);
   if (!raw) return { ...DEFAULT_SETTINGS };
   const quality = raw.quality === 'low' || raw.quality === 'medium' || raw.quality === 'ultra' ? raw.quality : 'high';
+  const resolutionScale = raw.resolutionScale === 0.5 || raw.resolutionScale === 0.7 || raw.resolutionScale === 0.85
+    ? raw.resolutionScale
+    : 1;
   const fpsLimit = raw.fpsLimit === 30 || raw.fpsLimit === 0 ? raw.fpsLimit : 60;
   return {
     quality,
+    resolutionScale,
     shadows: typeof raw.shadows === 'boolean' ? raw.shadows : DEFAULT_SETTINGS.shadows,
     effects: typeof raw.effects === 'boolean' ? raw.effects : DEFAULT_SETTINGS.effects,
     cameraFollow: typeof raw.cameraFollow === 'number' ? Math.min(0.24, Math.max(0.04, raw.cameraFollow)) : DEFAULT_SETTINGS.cameraFollow,

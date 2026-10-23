@@ -109,6 +109,7 @@ function createWheel(radius: number, width: number, dark: THREE.Material, rim: T
 
 export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
   const root = new THREE.Group();
+  root.scale.setScalar(1.1);
   const procedural = new THREE.Group();
   root.add(procedural);
   const wheels: THREE.Group[] = [];

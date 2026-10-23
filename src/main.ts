@@ -3,6 +3,7 @@ import { DriveEngine, type Telemetry } from './engine';
 import { STARTER_VEHICLES, VEHICLES, type MapId, type VehicleSpec } from './data';
 import { saveGame, loadSave, loadSettings, saveSettings, type SaveData, type GameSettings } from './save';
 import { GameInterface, type Screen, type UiAction, type UiSnapshot } from './ui';
+import { MultiplayerClient } from './multiplayer';
 
 const gameHost = document.querySelector<HTMLElement>('#game');
 const uiHost = document.querySelector<HTMLElement>('#interface');
@@ -69,6 +70,8 @@ const engine = new DriveEngine(gameHost, activeVehicle, currentMap, settings, {
     else if (currentScreen === 'pause') returnToPrevious();
   },
 });
+const multiplayer = new MultiplayerClient();
+engine.setMultiplayer(multiplayer);
 
 ui = new GameInterface(uiHost, snapshot(), {
   onAction: handleAction,
@@ -80,6 +83,13 @@ ui = new GameInterface(uiHost, snapshot(), {
     updateUi(false);
   },
 });
+multiplayer.setListeners(
+  (status, connected) => ui?.setMultiplayerInfo(status, connected, multiplayer.roomCode, multiplayer.playerCount),
+  (players) => {
+    engine.setRemotePlayers(players);
+    ui?.setMultiplayerInfo(multiplayer.statusMessage, multiplayer.isConnected, multiplayer.roomCode, multiplayer.playerCount);
+  },
+);
 ui.updateTelemetry(lastTelemetry);
 
 function toggleDevCodePanel(): void {
@@ -115,15 +125,30 @@ function returnToPrevious(): void {
   setScreen(returnScreen);
 }
 
-function handleAction(action: UiAction, id?: string): void {
-  if (action === 'toggle-drift') {
-    ui?.setDriftModeEnabled(engine.toggleDriftMode());
-    ui?.setMasterModeEnabled(engine.isMasterModeEnabled());
+function handleAction(action: UiAction, id?: string, payload?: { playerName?: string; roomCode?: string }): void {
+  if (action === 'multiplayer') {
+    openSubscreen('multiplayer');
     return;
   }
-  if (action === 'toggle-usta') {
-    ui?.setMasterModeEnabled(engine.toggleMasterMode());
-    ui?.setDriftModeEnabled(engine.isDriftModeEnabled());
+  if (action === 'multiplayer-create' || action === 'multiplayer-join') {
+    const playerName = payload?.playerName ?? 'Sürücü';
+    const roomCode = payload?.roomCode ?? '';
+    const request = action === 'multiplayer-create'
+      ? multiplayer.createRoom(playerName, activeVehicle.id)
+      : multiplayer.joinRoom(roomCode, playerName, activeVehicle.id);
+    void request;
+    return;
+  }
+  if (action === 'multiplayer-leave') {
+    multiplayer.leaveRoom();
+    return;
+  }
+  if (action === 'copy-room') {
+    if (multiplayer.roomCode) void navigator.clipboard?.writeText(multiplayer.roomCode);
+    return;
+  }
+  if (action === 'toggle-drift') {
+    ui?.setDriftModeEnabled(engine.toggleDriftMode());
     return;
   }
   if (action === 'start' || action === 'continue' || action === 'starter' || action === 'select-starter') {
@@ -278,6 +303,7 @@ window.addEventListener('beforeunload', () => {
   save.map = currentMap;
   saveGame(save);
   saveSettings(settings);
+  multiplayer.dispose();
 });
 
 window.addEventListener('keydown', (event) => {
