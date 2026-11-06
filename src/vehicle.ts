@@ -4,6 +4,8 @@ import { clone as cloneSkinnedModel } from 'three/addons/utils/SkeletonUtils.js'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { VehicleSpec } from './data';
 import { GLOW_LAYER } from './lampBloom';
+import { applyVarnishQuality, refineVehicleMaterials, setVarnishQualityDefault } from './vehicleMaterials';
+import type { GameSettings } from './save';
 
 export interface VehicleVisual {
   root: THREE.Group;
@@ -79,6 +81,51 @@ function lampMaterial(material: THREE.MeshStandardMaterial): LampMaterial {
 
 function emptyLights(): VehicleLights {
   return { brakeLamps: [], brakeNodes: [], reverseNodes: [], glow: null, brake: false, reverse: false };
+}
+
+// --- Contact shadow: a soft dark patch right under the car. The sun's shadow
+// map is too coarse to darken the narrow gap under the body; this patch seats
+// the car on the ground (also with shadows off). ---
+let contactShadowTexture: THREE.CanvasTexture | null = null;
+
+function contactShadowMap(): THREE.CanvasTexture {
+  if (contactShadowTexture) return contactShadowTexture;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d')!;
+  // The car's footprint as a blurred rounded rectangle (not a disc), so the
+  // darkening sits under the body and fades out right at its edges.
+  // alphaMap reads the green channel, not alpha: draw white on opaque black.
+  context.fillStyle = '#000';
+  context.fillRect(0, 0, size, size);
+  context.filter = 'blur(' + Math.round(size * 0.09) + 'px)';
+  context.fillStyle = '#fff';
+  const inset = size * 0.16;
+  context.beginPath();
+  context.roundRect(inset, inset, size - inset * 2, size - inset * 2, size * 0.14);
+  context.fill();
+  contactShadowTexture = new THREE.CanvasTexture(canvas);
+  return contactShadowTexture;
+}
+
+function createContactShadow(spec: VehicleSpec): THREE.Mesh {
+  const shadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(spec.width * 1.3, spec.length * 1.22),
+    new THREE.MeshBasicMaterial({
+      color: 0x000000, alphaMap: contactShadowMap(), transparent: true, opacity: 0.5, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    }),
+  );
+  shadow.name = 'contact-shadow';
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.position.y = 0.012;
+  shadow.renderOrder = 1;
+  shadow.castShadow = false;
+  shadow.receiveShadow = false;
+  shadow.userData.castsShadow = false;
+  return shadow;
 }
 
 interface LampGlow { meshes: THREE.Mesh[]; material: THREE.Material }
@@ -257,6 +304,8 @@ interface CachedModel {
   references: number;
   pendingUsers: number;
   progress: number; // 0..1 share of the file downloaded
+  /** Clear-coated materials of the loaded model, whose varnish follows the quality setting. */
+  varnished: THREE.MeshPhysicalMaterial[];
 }
 
 const modelCache = new Map<string, CachedModel>();
@@ -643,6 +692,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
     disposed: false,
     suspension,
   };
+  root.add(createContactShadow(spec));
   const tails: THREE.Mesh[] = [];
   procedural.traverse((object) => { if ((object as THREE.Mesh).material === taillight) tails.push(object as THREE.Mesh); });
   visual.lights.glow = createLampGlow(tails);
@@ -652,7 +702,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
 function getCachedModel(path: string, targetLength: number, rotationY = 0, excludeNodes: string[] = []): CachedModel {
   const cached = modelCache.get(path);
   if (cached) return cached;
-  const entry: CachedModel = { promise: Promise.resolve(null), references: 0, pendingUsers: 0, progress: 0 };
+  const entry: CachedModel = { promise: Promise.resolve(null), references: 0, pendingUsers: 0, progress: 0, varnished: [] };
   entry.promise = modelLoader.loadAsync(path, (event) => {
     if (event.lengthComputable && event.total > 0) entry.progress = event.loaded / event.total;
   }).then((gltf) => {
@@ -678,6 +728,7 @@ function getCachedModel(path: string, targetLength: number, rotationY = 0, exclu
     model.position.x -= center.x;
     model.position.z -= center.z;
     model.position.y -= bounds.min.y;
+    entry.varnished = refineVehicleMaterials(model, targetLength);
     mergeStaticMeshes(model);
     model.updateMatrixWorld(true);
     const partBounds = new THREE.Box3();
@@ -697,6 +748,12 @@ function getCachedModel(path: string, targetLength: number, rotationY = 0, exclu
   });
   modelCache.set(path, entry);
   return entry;
+}
+
+/** Applies the quality setting to every loaded car's paint (and to cars loaded later). */
+export function setVehicleMaterialQuality(quality: GameSettings['quality']): void {
+  setVarnishQualityDefault(quality);
+  for (const entry of modelCache.values()) applyVarnishQuality(entry.varnished, quality);
 }
 
 // How much of a car's model file has downloaded (0 when it has not started).
@@ -960,6 +1017,11 @@ export function disposeVehicleVisual(visual: VehicleVisual): void {
   visual.releaseModel?.();
   visual.releaseModel = null;
   disposeBrakeGlow(visual.lights);
+  const contactShadow = visual.root.getObjectByName('contact-shadow') as THREE.Mesh | undefined;
+  if (contactShadow) {
+    contactShadow.geometry.dispose();
+    (contactShadow.material as THREE.Material).dispose();
+  }
   visual.root.clear();
 }
 

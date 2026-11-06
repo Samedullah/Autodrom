@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CLASS_LABELS, MAP_LABELS, STARTER_VEHICLES, VEHICLES, type CarClass, type MapId, type VehicleSpec } from './data';
 import type { GameSettings, SaveData } from './save';
 import type { DrivingControl, Telemetry } from './engine';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel } from './vehicle';
 
 export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'pause' | 'store' | 'multiplayer' | null;
@@ -541,7 +542,7 @@ export class GameInterface {
       '</section><section class="settings-section"><div class="settings-section-head"><span>02</span><div><b>KAMERA & KONTROLLER</b><small>Takip hissini ve sürüşü ayarla</small></div></div>' +
         '<label class="setting-row"><span><b>Vites sistemi</b><small>Otomatikte 6.700 dev/dak yükseltir, uygun devirde küçültür</small></span><select data-setting="transmissionMode"><option value="manual"' + selected(settings.transmissionMode === 'manual') + '>Manuel</option><option value="automatic"' + selected(settings.transmissionMode === 'automatic') + '>Otomatik</option></select></label>' +
         '<label class="setting-row range-row"><span><b>Kamera takibi</b><small>Yumuşak takip <strong data-camera-value>' + percent.format(settings.cameraFollow * 100) + '%</strong></small></span><input type="range" min="4" max="24" value="' + Math.round(settings.cameraFollow * 100) + '" data-setting="cameraFollow"></label>' +
-        '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>T</kbd><span>Çekiş kontrolü (TCS)</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
+        '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>T</kbd><span>Çekiş kontrolü (TCS)</span></div><div><kbd>P</kbd><span>Geliştirici paneli (saat, yağmur)</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
       '</section></div><div class="settings-bottom"><span>AYARLAR BU TARAYICIDA KAYDEDİLİR</span><button class="button-primary compact" data-action="close"><span>UYGULA</span><b>✓</b></button></div></div>';
   }
 
@@ -579,6 +580,7 @@ class PreviewStage {
   private readonly camera = new THREE.PerspectiveCamera(35, 1, 0.1, 60);
   private readonly visual: ReturnType<typeof createVehicleVisual>;
   private readonly observer: ResizeObserver;
+  private readonly environment: THREE.WebGLRenderTarget;
   private frameId = 0;
   private angle = -0.28;
   private lastFrameTime = 0;
@@ -591,7 +593,8 @@ class PreviewStage {
     this.scene.fog = new THREE.Fog('#202925', 10, 30);
     const key = new THREE.DirectionalLight('#fff1d1', 3.2);
     key.position.set(-5, 8, 7);
-    this.scene.add(key, new THREE.HemisphereLight('#e4f2e8', '#55615a', 2));
+    // A soft studio environment does most of the lighting: showroom reflections on paint and glass.
+    this.scene.add(key, new THREE.HemisphereLight('#e4f2e8', '#55615a', 0.45));
     const platform = new THREE.Mesh(
       new THREE.CylinderGeometry(3.8, 3.8, 0.15, 64),
       new THREE.MeshStandardMaterial({ color: '#4a554e', roughness: 0.6, metalness: 0.3 }),
@@ -618,6 +621,11 @@ class PreviewStage {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.15;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    const generator = new THREE.PMREMGenerator(this.renderer);
+    this.environment = generator.fromScene(new RoomEnvironment(), 0.04);
+    generator.dispose();
+    this.scene.environment = this.environment.texture;
+    this.scene.environmentIntensity = 0.85;
     this.renderer.domElement.className = 'preview-canvas';
     this.host.appendChild(this.renderer.domElement);
     this.host.addEventListener('pointerdown', this.onPointerDown);
@@ -686,6 +694,7 @@ class PreviewStage {
     window.removeEventListener('pointermove', this.onPointerMove);
     window.removeEventListener('pointerup', this.onPointerUp);
     if (this.renderer.domElement.parentElement === this.host) this.host.removeChild(this.renderer.domElement);
+    this.environment.dispose();
     this.renderer.dispose();
     disposeVehicleVisual(this.visual);
     disposeSceneResources(this.scene);

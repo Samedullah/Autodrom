@@ -4,6 +4,7 @@ import { STARTER_VEHICLES, VEHICLES, type MapId, type VehicleSpec } from './data
 import { isValidMap, saveGame, loadSave, loadSettings, saveSettings, type SaveData, type GameSettings } from './save';
 import { GameInterface, type Screen, type UiAction, type UiSnapshot } from './ui';
 import { MultiplayerClient } from './multiplayer';
+import { DebugPanel } from './debugPanel';
 
 const gameHost = document.querySelector<HTMLElement>('#game');
 const uiHost = document.querySelector<HTMLElement>('#interface');
@@ -58,6 +59,7 @@ const engine = new DriveEngine(gameHost, activeVehicle, currentMap, settings, {
   },
   onDevCode: () => toggleDevCodePanel(),
   onToggleTcs: () => ui?.setTcsEnabled(engine.toggleTcs()),
+  onDebugPanel: () => toggleDebugPanel(),
   onTelemetry: (telemetry) => {
     lastTelemetry = telemetry;
     ui?.updateTelemetry(telemetry);
@@ -124,6 +126,25 @@ function hideLoading(): void {
 engine.prepare(reportLoading)
   .catch((error: unknown) => console.warn('Ön yükleme tamamlanamadı:', error))
   .finally(hideLoading);
+
+// Developer panel (P): time of day, weather, renderer numbers.
+const debugPanel = new DebugPanel((changes) => {
+  engine.setEnvironment(changes);
+  debugPanel.showState(engine.getEnvironment());
+});
+let debugTimer = 0;
+
+function refreshDebugPanel(): void {
+  debugPanel.showState(engine.getEnvironment());
+  debugPanel.showInfo({ ...engine.debugInfo(), quality: settings.quality });
+}
+
+function toggleDebugPanel(): void {
+  window.clearInterval(debugTimer);
+  if (!debugPanel.toggle()) return;
+  refreshDebugPanel();
+  debugTimer = window.setInterval(refreshDebugPanel, 250);
+}
 
 function toggleDevCodePanel(): void {
   if (!ui) return;

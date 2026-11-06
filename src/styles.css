@@ -839,3 +839,27 @@ button { color: inherit; }
 @media (pointer: coarse) and (max-width: 1024px), (pointer: coarse) and (max-height: 600px), (max-width: 600px) {
   .speed-cluster { left: 50%; right: auto; transform: translateX(-50%); }
 }
+
+/* Developer panel (P). */
+.debug-panel {
+  position: fixed; top: 92px; right: 18px; z-index: 40; width: 286px; display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px; border: 1px solid rgba(184, 237, 201, .25); border-radius: 12px; color: #dce7de;
+  background: rgba(12, 18, 15, .86); backdrop-filter: blur(10px); font: 500 10px var(--mono); letter-spacing: .04em;
+}
+.debug-panel[hidden] { display: none; }
+.debug-panel header { display: flex; justify-content: space-between; align-items: baseline; }
+.debug-panel header b { color: var(--mint); letter-spacing: .16em; }
+.debug-panel header span { color: #7f8f84; font-size: 9px; }
+.debug-row { display: flex; flex-direction: column; gap: 5px; }
+.debug-row > span { display: flex; justify-content: space-between; }
+.debug-row b { color: #fff; }
+.debug-row input[type='range'] { width: 100%; accent-color: #b8edc9; }
+.debug-inline { flex-direction: row; justify-content: space-between; align-items: center; }
+.debug-inline label { display: flex; align-items: center; gap: 6px; }
+.debug-panel select, .debug-presets button {
+  padding: 4px 6px; border: 1px solid rgba(184, 237, 201, .25); border-radius: 6px; color: #dce7de;
+  background: rgba(40, 56, 46, .7); font: inherit; cursor: pointer;
+}
+.debug-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.debug-presets button:hover { border-color: var(--mint); }
+.debug-stats { margin: 0; padding: 8px; border-radius: 7px; background: rgba(0, 0, 0, .35); color: #b6c6ba; font: inherit; line-height: 1.55; white-space: pre; }

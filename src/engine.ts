@@ -2,11 +2,13 @@ import * as THREE from 'three';
 import { ECONOMY, MAP_LABELS, VEHICLES, VEHICLE_SCALE, type MapId, type VehicleSpec } from './data';
 import { IncomeClock } from './economy';
 import type { GameSettings } from './save';
-import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
+import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleMaterialQuality, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
 import { VehicleAudio } from './vehicleAudio';
 import { TireSmoke } from './tireSmoke';
 import { MotionBlur } from './motionBlur';
 import { LampBloom } from './lampBloom';
+import { Atmosphere, DAYLIGHT } from './atmosphere';
+import { Environment, applyWetness, type EnvironmentState } from './environment';
 import { Drivetrain, GEAR_SPEED, ROLLING_RESISTANCE, rpmAtSpeed, type Gear } from './drivetrain';
 import type { LocalPlayerState, MultiplayerClient, MultiplayerPlayer } from './multiplayer';
 import { buildWorld, groundHeightAt, type WorldData } from './world';
@@ -28,6 +30,7 @@ export interface EngineCallbacks {
   onMissionComplete: (amount: number) => void;
   onMissionFailed: () => void;
   onDevCode: () => void;
+  onDebugPanel: () => void;
   onToggleTcs: () => void;
   onTelemetry: (telemetry: Telemetry) => void;
   onEscape: () => void;
@@ -72,6 +75,10 @@ const AUTO_DOWNSHIFT_RPM = 2500;
 const SMOKE_EMIT_INTERVAL = 0.03;
 // A model this slow to arrive finishes loading in the background instead.
 const MODEL_LOAD_TIMEOUT_MS = 30000;
+// Headlight beam strength at full darkness (candela).
+const HEADLIGHT_INTENSITY = 1800;
+// Seconds between re-bakes of the sky reflections while the light changes.
+const ENVIRONMENT_BAKE_INTERVAL = 1.2;
 // Steering lock halves at about this speed (m/s, ~160 km/h) and keeps falling.
 const STEERING_FADE_SPEED = 45;
 // Base cornering grip in g on top of which the car's handling adds up to 0.2 g.
@@ -105,7 +112,7 @@ const SMOKE_BUILD_TIME = 1.6;
 const SMOKE_DECAY_TIME = 0.4;
 // The sun's shadow camera covers this many metres around the player's car and
 // follows it, instead of covering the whole map at once.
-const SHADOW_HALF_EXTENT = 70;
+
 // Direction from the shadow target to the sun (same angle as the old fixed sun).
 const SUN_OFFSET = new THREE.Vector3(-80, 160, -60);
 const GRAVITY = 9.81;
@@ -134,6 +141,25 @@ function pixelRatioLimit(quality: GameSettings['quality']): number {
   return quality === 'medium' ? 1 : 0.9;
 }
 
+/**
+ * Light levels per quality. The baked sky environment now gives materials
+ * their ambient light and reflections, so the hemisphere light is only a
+ * small fill; low quality (no shadows) leans on it more.
+ */
+function lightingFor(quality: GameSettings['quality']): { fill: number; sun: number; environment: number } {
+  if (quality === 'low') return { fill: 0.9, sun: 2.6, environment: 0.65 };
+  if (quality === 'medium') return { fill: 0.45, sun: 3, environment: 0.9 };
+  return { fill: 0.35, sun: 3.1, environment: 1 };
+}
+
+// Metres the sun's shadow covers around the car: smaller areas give sharper
+// shadows from the same map (~5 cm texels on high, ~4 cm on ultra).
+function shadowHalfExtent(quality: GameSettings['quality']): number {
+  if (quality === 'ultra') return 60;
+  if (quality === 'high') return 40;
+  return 36;
+}
+
 function shadowMapResolution(quality: GameSettings['quality']): number {
   if (quality === 'ultra') return 3072;
   if (quality === 'high') return 1536;
@@ -148,6 +174,21 @@ export class DriveEngine {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly motionBlur: MotionBlur;
   private readonly lampBloom: LampBloom;
+  private readonly atmosphere = new Atmosphere(DAYLIGHT, SUN_OFFSET);
+  private readonly environment: Environment;
+  // Direction and distance from the shadow target to the light; follows the sun or moon.
+  private readonly sunOffset = SUN_OFFSET.clone();
+  private readonly sunForward = new THREE.Vector3();
+  private readonly headlight = new THREE.SpotLight('#fff3df', 0, 95, 0.52, 0.6, 1.4);
+  private fogBase = { near: 108, far: 950 };
+  private bakedHour = 0;
+  private bakeForced = true;
+  private bakedRain = -1;
+  private bakedAt = -Infinity;
+  private wetnessApplied = -1;
+  private environmentTime = 0;
+  private environmentBakes = 0;
+  private fps = 60;
   private readonly initialModel: Promise<boolean>;
   private readonly blurFocus = new THREE.Vector2(0.5, 0.6);
   private readonly blurProbe = new THREE.Vector3();
@@ -257,29 +298,26 @@ export class DriveEngine {
   ) {
     this.vehicle = vehicle;
     this.drivetrain = new Drivetrain(vehicle);
+    setVehicleMaterialQuality(settings.quality);
     this.mapId = mapId;
     this.settings = { ...settings };
     this.callbacks = callbacks;
     this.scene.background = new THREE.Color('#9aafac');
     this.scene.fog = new THREE.Fog('#9aafac', 108, 950);
-    this.ambient = new THREE.HemisphereLight('#e4f0e8', '#59624f', 2.15);
+    this.ambient = new THREE.HemisphereLight('#e4f0e8', '#59624f', lightingFor(this.settings.quality).fill);
     this.scene.add(this.ambient);
-    this.sun = new THREE.DirectionalLight('#fff1d5', 3.1);
+    this.sun = new THREE.DirectionalLight('#fff1d5', lightingFor(this.settings.quality).sun);
     this.scene.add(this.sun.target);
     this.sun.castShadow = true;
-    this.sun.shadow.camera.left = -SHADOW_HALF_EXTENT;
-    this.sun.shadow.camera.right = SHADOW_HALF_EXTENT;
-    this.sun.shadow.camera.top = SHADOW_HALF_EXTENT;
-    this.sun.shadow.camera.bottom = -SHADOW_HALF_EXTENT;
+    this.applyShadowExtent();
     this.sun.shadow.camera.near = 1;
     this.sun.shadow.camera.far = SUN_OFFSET.length() + 120;
-    this.sun.shadow.bias = -0.0003;
+    this.sun.shadow.bias = -0.0002;
+    // Offsets along the surface normal: no shadow acne on curved bodywork.
+    this.sun.shadow.normalBias = 0.025;
     this.sun.shadow.camera.updateProjectionMatrix();
     // Light-space axes used to snap the moving shadow camera to whole texels,
     // which keeps shadow edges from shimmering while the car drives.
-    const sunForward = SUN_OFFSET.clone().negate().normalize();
-    this.shadowRight.crossVectors(sunForward, new THREE.Vector3(0, 1, 0)).normalize();
-    this.shadowUp.crossVectors(this.shadowRight, sunForward).normalize();
     this.scene.add(this.sun);
     // Yaw first, then pitch/roll in the car's own frame.
     this.carRoot.rotation.order = 'YXZ';
@@ -297,6 +335,13 @@ export class DriveEngine {
     this.scene.add(this.skidMarks);
     this.tireSmoke.mesh.visible = this.settings.effects;
     this.scene.add(this.tireSmoke.mesh);
+    this.scene.add(this.atmosphere.dome);
+    this.environment = new Environment(this.settings.quality);
+    this.scene.add(this.environment.rain.mesh);
+    // Headlights: always in the scene (adding a light later would recompile
+    // every material), dark by day.
+    this.headlight.castShadow = false;
+    this.carRoot.add(this.headlight, this.headlight.target);
     this.worldData = buildWorld(mapId, this.settings);
     this.scene.add(this.worldData.root);
     this.visual = createVehicleVisual(vehicle);
@@ -313,9 +358,14 @@ export class DriveEngine {
     this.renderer.setSize(host.clientWidth, host.clientHeight, false);
     this.renderer.shadowMap.enabled = this.settings.shadows && this.settings.quality !== 'low';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // Frames draw several passes (shadows, blur, bloom); count them all, reset once per frame.
+    this.renderer.info.autoReset = false;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.14;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    // Image-based lighting from the sky: reflections and ambient for every PBR material.
+    this.scene.environment = this.atmosphere.environmentMap(this.renderer);
+    this.scene.environmentIntensity = lightingFor(this.settings.quality).environment;
     // The offscreen target does not get the canvas' MSAA, so ask for its own.
     this.motionBlur = new MotionBlur(this.renderer, antialias ? 4 : 0);
     this.lampBloom = new LampBloom(this.renderer);
@@ -345,6 +395,11 @@ export class DriveEngine {
     if (key === 'escape') {
       event.preventDefault();
       this.callbacks.onEscape();
+      return;
+    }
+    if (key === 'p') {
+      event.preventDefault();
+      if (!event.repeat) this.callbacks.onDebugPanel();
       return;
     }
     if (key === 'm') {
@@ -668,12 +723,16 @@ export class DriveEngine {
       this.sun.shadow.map = null;
       this.sun.shadow.mapSize.set(shadowResolution, shadowResolution);
     }
+    this.applyShadowExtent();
     this.skidMarks.visible = settings.effects;
     this.tireSmoke.mesh.visible = settings.effects;
     if (!settings.effects) this.tireSmoke.clear();
     if (!settings.effects) this.clearSkids();
-    this.ambient.intensity = settings.quality === 'low' ? 1.7 : 2.15;
-    this.sun.intensity = settings.quality === 'low' ? 2.4 : 3.1;
+    setVehicleMaterialQuality(settings.quality);
+    const lighting = lightingFor(settings.quality);
+    this.ambient.intensity = lighting.fill;
+    this.sun.intensity = lighting.sun;
+    this.scene.environmentIntensity = lighting.environment;
     this.applyMapPalette();
     this.scene.traverse((object) => {
       if ((object as THREE.Mesh).isMesh) {
@@ -725,24 +784,119 @@ export class DriveEngine {
     this.updateShadowFrustum();
   }
 
+  private applyShadowExtent(): void {
+    const extent = shadowHalfExtent(this.settings.quality);
+    const camera = this.sun.shadow.camera;
+    camera.left = -extent;
+    camera.right = extent;
+    camera.top = extent;
+    camera.bottom = -extent;
+    camera.updateProjectionMatrix();
+  }
+
   private updateShadowFrustum(): void {
-    const texel = (SHADOW_HALF_EXTENT * 2) / this.sun.shadow.mapSize.width;
+    // Light-space axes, used to snap the moving shadow camera to whole texels
+    // so shadow edges do not shimmer while the car drives.
+    this.sunForward.copy(this.sunOffset).negate().normalize();
+    this.shadowRight.crossVectors(this.sunForward, THREE.Object3D.DEFAULT_UP).normalize();
+    this.shadowUp.crossVectors(this.shadowRight, this.sunForward).normalize();
+    const texel = (this.sun.shadow.camera.right * 2) / this.sun.shadow.mapSize.width;
     const car = this.carRoot.position;
     const right = car.dot(this.shadowRight);
     const up = car.dot(this.shadowUp);
     this.sun.target.position.set(car.x, car.y, car.z)
       .addScaledVector(this.shadowRight, Math.round(right / texel) * texel - right)
       .addScaledVector(this.shadowUp, Math.round(up / texel) * texel - up);
-    this.sun.position.copy(this.sun.target.position).add(SUN_OFFSET);
+    this.sun.position.copy(this.sun.target.position).add(this.sunOffset);
+  }
+
+  /** Time of day and weather onto the lights, sky, fog, rain and wet ground. */
+  private updateEnvironment(dt: number): void {
+    this.environmentTime += dt;
+    const lighting = this.environment.update(dt);
+    const levels = lightingFor(this.settings.quality);
+    this.atmosphere.setSky(lighting.sky, lighting.lightDirection, lighting.disc, lighting.glow);
+    this.sunOffset.copy(lighting.lightDirection).multiplyScalar(SUN_OFFSET.length());
+    this.sun.color.copy(lighting.lightColor);
+    this.sun.intensity = levels.sun * lighting.lightShare;
+    this.ambient.color.copy(lighting.fillSky);
+    this.ambient.groundColor.copy(lighting.fillGround);
+    this.ambient.intensity = levels.fill * lighting.fillShare;
+    const fog = this.scene.fog as THREE.Fog | null;
+    if (fog) {
+      fog.color.copy(this.atmosphere.fogColor);
+      fog.near = this.fogBase.near * lighting.fogNear;
+      fog.far = this.fogBase.far * lighting.fogFar;
+    }
+    (this.scene.background as THREE.Color | null)?.copy(this.atmosphere.fogColor);
+    this.headlight.intensity = HEADLIGHT_INTENSITY * lighting.darkness;
+    this.headlight.position.set(0, this.vehicle.height * 0.42, this.vehicle.length * 0.47);
+    this.headlight.target.position.set(0, 0, this.vehicle.length * 0.47 + 28);
+    const state = this.environment.state;
+    this.environment.rain.update(this.camera, this.environmentTime, state.rain, 1 - lighting.darkness * 0.75);
+    if (Math.abs(lighting.wetness - this.wetnessApplied) > 0.02) {
+      applyWetness(this.worldData.root, lighting.wetness);
+      this.wetnessApplied = lighting.wetness;
+    }
+    // Re-bake the sky's reflections now and then as the light changes.
+    const hourChange = Math.abs(THREE.MathUtils.euclideanModulo(state.timeOfDay - this.bakedHour + 12, 24) - 12);
+    if (this.bakeForced || (this.environmentTime - this.bakedAt > ENVIRONMENT_BAKE_INTERVAL
+      && (hourChange > 0.12 || Math.abs(state.rain - this.bakedRain) > 0.04))) {
+      this.bakeForced = false;
+      this.scene.environment = this.atmosphere.bake(this.renderer);
+      this.environmentBakes += 1;
+      this.bakedHour = state.timeOfDay;
+      this.bakedRain = state.rain;
+      this.bakedAt = this.environmentTime;
+      this.sceneNeedsRender = true;
+    }
+  }
+
+  getEnvironment(): EnvironmentState {
+    return { ...this.environment.state };
+  }
+
+  setEnvironment(changes: Partial<EnvironmentState>): void {
+    this.environment.set(changes);
+    this.bakeForced = true;
+    this.sceneNeedsRender = true;
+  }
+
+  /** Numbers for the debug panel. */
+  debugInfo(): {
+    fps: number; drawCalls: number; triangles: number; geometries: number; textures: number;
+    position: THREE.Vector3; speedKmh: number; mapId: MapId; vehicle: string; wetness: number;
+    sun: number; fill: number; environment: number; headlight: number; bakes: number;
+  } {
+    const info = this.renderer.info;
+    return {
+      fps: this.fps,
+      drawCalls: info.render.calls,
+      triangles: info.render.triangles,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      position: this.carRoot.position.clone(),
+      speedKmh: this.velocity.length() * ECONOMY.kmhPerUnit,
+      mapId: this.mapId,
+      vehicle: this.vehicle.name,
+      wetness: this.environment.currentWetness,
+      sun: this.sun.intensity,
+      fill: this.ambient.intensity,
+      environment: this.scene.environmentIntensity,
+      headlight: this.headlight.intensity,
+      bakes: this.environmentBakes,
+    };
   }
 
   private applyMapPalette(): void {
-    const color = '#a9b9ae';
-    this.scene.background = new THREE.Color(color);
+    // The sky dome covers the background; the fog takes its horizon colour.
+    const color = this.atmosphere.fogColor;
+    this.scene.background = color.clone();
     const fog = this.settings.quality === 'low'
       ? new THREE.Fog(color, 80, 520)
       : new THREE.Fog(color, 108, this.settings.quality === 'ultra' ? 1200 : this.settings.quality === 'high' ? 950 : 700);
     this.scene.fog = fog;
+    this.fogBase = { near: fog.near, far: fog.far };
     // Past fog.far everything is exactly the background colour, so do not draw it.
     this.camera.far = fog.far + 20;
     this.camera.updateProjectionMatrix();
@@ -759,8 +913,12 @@ export class DriveEngine {
   }
 
   private frame = (time: number): void => {
-    const dt = Math.min(this.clock.getDelta(), 0.05);
+    const rawDt = this.clock.getDelta();
+    const dt = Math.min(rawDt, 0.05);
+    if (rawDt > 0) this.fps += (1 / rawDt - this.fps) * 0.08;
     if (this.active) {
+      this.renderer.info.reset();
+      this.updateEnvironment(dt);
       if (this.drivingEnabled) this.updateDriving(dt);
       else this.updateTireSmoke(dt, 0);
       this.updateRemoteVehicles(dt);
@@ -1539,9 +1697,10 @@ export class DriveEngine {
         );
       }
     }
+    this.atmosphere.follow(this.camera);
     this.motionBlur.render(this.scene, this.camera, strength, this.blurFocus);
     // Lit brake lamps spread their light (only while one is lit).
-    if (this.settings.effects && this.visual.lights.brake) this.lampBloom.render(this.scene, this.camera);
+    if (this.settings.effects && this.settings.quality !== 'low' && this.visual.lights.brake) this.lampBloom.render(this.scene, this.camera);
   }
 
   private updateCamera(dt: number, snap = false): void {
@@ -1615,6 +1774,8 @@ export class DriveEngine {
     this.renderer.domElement.removeEventListener('wheel', this.onCameraWheel);
     this.host.removeChild(this.renderer.domElement);
     this.motionBlur.dispose();
+    this.atmosphere.dispose();
+    this.environment.dispose();
     this.lampBloom.dispose();
     this.renderer.dispose();
     this.vehicleAudio.dispose();
