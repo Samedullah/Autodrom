@@ -1,3 +1,4 @@
+import type { MapId } from './data';
 import type { Socket } from 'socket.io-client';
 
 const CONNECT_TIMEOUT_MS = 30_000;
@@ -14,6 +15,8 @@ export interface MultiplayerPlayer {
   drifting: boolean;
   burnout: boolean;
   rearWheelSpinRate: number;
+  /** Missing when the server predates map ids. */
+  mapId?: MapId;
 }
 
 export interface LocalPlayerState {
@@ -26,6 +29,7 @@ export interface LocalPlayerState {
   drifting: boolean;
   burnout: boolean;
   rearWheelSpinRate: number;
+  mapId: MapId;
 }
 
 interface RoomResponse {

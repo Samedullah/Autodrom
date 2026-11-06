@@ -31,6 +31,7 @@ export class VehicleAudio {
   private loadScrubber: ScriptProcessorNode | null = null;
   private readonly buffers: Partial<Record<SoundLayer, AudioBuffer>> = {};
   private loading: Promise<void> | null = null;
+  private downloads: Promise<Partial<Record<SoundLayer, ArrayBuffer>>> | null = null;
   private rpm = IDLE_RPM;
   private disposed = false;
 
@@ -68,8 +69,9 @@ export class VehicleAudio {
     const speedBlend = Math.min(1, Math.max(0, state.speedKmh / 180));
     const freeRevTarget = IDLE_RPM + throttle * (REDLINE_RPM - IDLE_RPM)
       * (state.gear === 0 ? 1 : speedBlend < 0.06 ? 0.48 : 0.08);
-    const targetRpm = state.gear === 0 ? freeRevTarget : Math.max(state.rpm, freeRevTarget);
-    const rpmResponse = throttle > 0 ? 7 : 3;
+    // In gear the engine model already gives the real rpm (clutch slip, wheelspin, limiter).
+    const targetRpm = state.gear === 0 ? freeRevTarget : state.rpm;
+    const rpmResponse = state.gear === 0 ? (throttle > 0 ? 7 : 3) : 18;
     this.rpm += (targetRpm - this.rpm) * (1 - Math.exp(-rpmResponse * Math.max(0, state.dt)));
 
     const rpmBlend = Math.min(1, Math.max(0, (this.rpm - IDLE_RPM) / (REDLINE_RPM - IDLE_RPM)));
@@ -100,16 +102,37 @@ export class VehicleAudio {
     this.master = null;
   }
 
+  // Downloads the clips ahead of time (no user gesture needed), so sound can
+  // start the moment the first input unlocks the audio context.
+  prefetch(): Promise<void> {
+    if (!this.downloads) {
+      this.downloads = (async () => {
+        const files: Partial<Record<SoundLayer, ArrayBuffer>> = {};
+        await Promise.all((Object.entries(AUDIO_FILES) as [SoundLayer, string][]).map(async ([layer, url]) => {
+          try {
+            const response = await fetch(url);
+            if (response.ok) files[layer] = await response.arrayBuffer();
+          } catch {
+            // Files will be added later; silently skip absent clips.
+          }
+        }));
+        return files;
+      })();
+    }
+    return this.downloads.then(() => undefined);
+  }
+
   private async loadBuffers(): Promise<void> {
     const context = this.context;
     if (!context) return;
-    await Promise.all((Object.entries(AUDIO_FILES) as [SoundLayer, string][]).map(async ([layer, url]) => {
+    await this.prefetch();
+    const files = await this.downloads!;
+    await Promise.all((Object.entries(files) as [SoundLayer, ArrayBuffer][]).map(async ([layer, data]) => {
       try {
-        const response = await fetch(url);
-        if (!response.ok) return;
-        this.buffers[layer] = await context.decodeAudioData(await response.arrayBuffer());
+        // decodeAudioData detaches its input, so decode a copy.
+        this.buffers[layer] = await context.decodeAudioData(data.slice(0));
       } catch {
-        // Files will be added later; silently skip absent or unsupported clips.
+        // Unsupported clip: skip it.
       }
     }));
   }

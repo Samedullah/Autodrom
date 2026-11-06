@@ -1,13 +1,18 @@
 import * as THREE from 'three';
-import { ECONOMY, VEHICLES, type MapId, type VehicleSpec } from './data';
+import { ECONOMY, MAP_LABELS, VEHICLES, VEHICLE_SCALE, type MapId, type VehicleSpec } from './data';
 import { IncomeClock } from './economy';
 import type { GameSettings } from './save';
-import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
+import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
 import { VehicleAudio } from './vehicleAudio';
+import { TireSmoke } from './tireSmoke';
+import { MotionBlur } from './motionBlur';
+import { LampBloom } from './lampBloom';
+import { Drivetrain, GEAR_SPEED, ROLLING_RESISTANCE, rpmAtSpeed, type Gear } from './drivetrain';
 import type { LocalPlayerState, MultiplayerClient, MultiplayerPlayer } from './multiplayer';
-import { buildWorld, type WorldData } from './world';
+import { buildWorld, groundHeightAt, type WorldData } from './world';
+import type { WallGrid } from './terrain';
 
-export type Gear = -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6;
+export type { Gear } from './drivetrain';
 export type DrivingControl = 'gas' | 'brake' | 'left' | 'right' | 'handbrake';
 
 export interface Telemetry {
@@ -15,6 +20,7 @@ export interface Telemetry {
   gear: Gear;
   rpm: number;
   drifting: boolean;
+  tcsActive: boolean;
 }
 
 export interface EngineCallbacks {
@@ -22,6 +28,7 @@ export interface EngineCallbacks {
   onMissionComplete: (amount: number) => void;
   onMissionFailed: () => void;
   onDevCode: () => void;
+  onToggleTcs: () => void;
   onTelemetry: (telemetry: Telemetry) => void;
   onEscape: () => void;
 }
@@ -30,26 +37,101 @@ interface RemoteVehicle {
   target: MultiplayerPlayer;
   root: THREE.Group;
   visual: VehicleVisual;
+  spec: VehicleSpec;
   wheelTravel: number;
   rearWheelTravel: number;
   steeringAngle: number;
   smokeEmitElapsed: number;
+  smokeBuild: number;
+  smokeEmitter: number;
   previousX: number;
   previousZ: number;
 }
 
-const GEAR_SPEED = [0, 0.17, 0.31, 0.48, 0.66, 0.84, 1];
-const GEAR_TORQUE = [0, 1, 0.82, 0.68, 0.57, 0.49, 0.43];
-const GEAR_LAUNCH_SPEED_KMH = [0, 0, 0, 0, 20, 30, 40];
-const ACCELERATION_SCALE = 0.35;
+
+// --- Drift ayarları: sayıları değiştirerek hissi buradan ayarlayabilirsin ---
+const DRIFT_TUNING = {
+  baseGrip: 2.0,          // drift modunda temel yanal tutuş (eski: 2.7). Düşük = daha çok kayar
+  minGrip: 0.75,          // en düşük tutuş (eski: 1.15)
+  gasGripLoss: 1.0,       // gaz basılıyken kaybedilen tutuş (eski: 0.55)
+  slipGripLoss: 0.55,     // kayma açısı arttıkça tutuşun azalma oranı (0-1)
+  slipGripSensitivity: 2.2, // kayma açısına tepki hızı
+  yawAccelLow: 3.4,       // düşük hızda dönüş ivmesi (eski: 4.4)
+  yawAccelHigh: 2.4,      // yüksek hızda dönüş ivmesi (eski: 3.2)
+  yawUsesTotalSpeed: 0.9, // 0-1: dönüş hızı toplam hıza ne kadar bağlansın (açı sınırını kaldırır)
+  selfAlignCut: 0.7,      // aracı düz yöne çeken toparlanmayı kısma oranı (0-1)
+  slideDriveBoost: 0.4,   // kayarken kaybolan yanal hızın ileri hıza dönen kısmı (gaz hissi)
+  slideDragGas: 0.2,      // gaz basılıyken kayma sürtünmesi çarpanı
+  slideDrag: 0.05,        // kayma sürtünmesi
+  brakeLateralDecay: 1.6, // frende yanal hızın sönme hızı
+  counterSteerMax: 0.62,  // karşı direksiyon görselinde en fazla tekerlek açısı (rad)
+};
 const DOWNSHIFT_SAFE_SPEED_FACTOR = 0.9;
 const AUTO_UPSHIFT_RPM = 6700;
 const AUTO_DOWNSHIFT_RPM = 2500;
-const SMOKE_EMIT_INTERVAL = 0.012;
+const SMOKE_EMIT_INTERVAL = 0.03;
+// A model this slow to arrive finishes loading in the background instead.
+const MODEL_LOAD_TIMEOUT_MS = 30000;
+// Steering lock halves at about this speed (m/s, ~160 km/h) and keeps falling.
+const STEERING_FADE_SPEED = 45;
+// Base cornering grip in g on top of which the car's handling adds up to 0.2 g.
+// Above real road grip (~1.1 g) on purpose: tight enough to stop darting at
+// speed, loose enough for city corners to feel quick.
+const GRIP_LATERAL_G = 1.6;
+// Engine braking in 1st gear (m/s²), falling off in higher gears. Rolling and
+// air resistance come from the drivetrain module (air drag is per car).
+const ENGINE_BRAKING = 1.6;
+// Rear axle behind the car's centre, as a share of its length (as the smoke and skid code place it).
+const REAR_AXLE_SHARE = 0.31;
+// Distance between wall checks along a frame's move (m); walls are 1 m cells.
+const WALL_CHECK_STEP = 0.5;
+// Chase camera framing, set on the 911 GT3 RS (5.48 m long, 1.58 m tall in
+// game) and scaled with each car's size so every car sits the same on screen.
+const CAMERA_REFERENCE_LENGTH = 5.48;
+const CAMERA_REFERENCE_HEIGHT = 1.58;
+const CAMERA_DISTANCE = 7.75;       // m from the car's centre to the lens
+const CAMERA_TARGET_HEIGHT = 1.05;  // m above the ground the camera aims at
+const CAMERA_ELEVATION = 0.197;     // rad, ~11° looking down
+const CAMERA_PULLBACK = 0.035;      // distance added at full pull-back, as a share
+const CAMERA_PULLBACK_START = 150 / 3.6;
+const CAMERA_PULLBACK_FULL = 320 / 3.6;
+// Speed blur: none below the first speed, full strength at the second.
+const MOTION_BLUR_START = 90 / 3.6;
+const MOTION_BLUR_FULL = 260 / 3.6;
+const MOTION_BLUR_MAX = 0.075;
+// Smoke builds up while the tyres keep sliding: thin wisps at first, a thick
+// cloud after this many seconds. It dies back quicker once grip returns.
+const SMOKE_BUILD_TIME = 1.6;
+const SMOKE_DECAY_TIME = 0.4;
+// The sun's shadow camera covers this many metres around the player's car and
+// follows it, instead of covering the whole map at once.
+const SHADOW_HALF_EXTENT = 70;
+// Direction from the shadow target to the sun (same angle as the old fixed sun).
+const SUN_OFFSET = new THREE.Vector3(-80, 160, -60);
+const GRAVITY = 9.81;
+// Rise allowed in one step beyond the slope itself; more is a ramp's vertical face: a wall.
+const MAX_STEP_UP = 0.4;
+// Suspension, tuned like a firm sports car rather than per model: ~2 Hz body
+// bounce, well damped, stiff anti-roll bars, little roll and pitch under load.
+const SUSPENSION = {
+  frequencyHz: 1.95,
+  dampingRatio: 0.5,
+  bumpTravel: 0.09,       // compression past static ride height before the bump stop (m)
+  bumpStopStiffness: 12,  // bump stop rate as a multiple of the spring rate
+  bumpStopDamping: 5,     // extra damping inside the bump stop: it absorbs, it does not bounce
+  hardLimit: 0.16,        // compression the body can never exceed (m)
+  centerOfMassHeight: 0.48,
+  pitchGyration: 0.29,    // radius of gyration as a share of car length
+  rollGyration: 0.3,      // radius of gyration as a share of car width
+  antiRollShare: 1.15,    // anti-roll bars add this share of the springs' own roll stiffness
+  maxInertialAccel: 9,    // ~0.9 g: what street tyres can transmit; also ignores wall hits
+  airAngularDamping: 1.4, // gentle loss of pitch/roll spin while airborne (1/s)
+  substep: 1 / 240,
+} as const;
 function pixelRatioLimit(quality: GameSettings['quality']): number {
   if (quality === 'ultra') return 2.25;
-  if (quality === 'high') return 1.65;
-  return quality === 'medium' ? 1.25 : 0.9;
+  if (quality === 'high') return 1.25;
+  return quality === 'medium' ? 1 : 0.9;
 }
 
 function shadowMapResolution(quality: GameSettings['quality']): number {
@@ -64,6 +146,11 @@ function renderPixelRatio(quality: GameSettings['quality'], resolutionScale: Gam
 
 export class DriveEngine {
   private readonly renderer: THREE.WebGLRenderer;
+  private readonly motionBlur: MotionBlur;
+  private readonly lampBloom: LampBloom;
+  private readonly initialModel: Promise<boolean>;
+  private readonly blurFocus = new THREE.Vector2(0.5, 0.6);
+  private readonly blurProbe = new THREE.Vector3();
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(57, 1, 0.1, 1400);
   private readonly clock = new THREE.Clock();
@@ -90,10 +177,14 @@ export class DriveEngine {
   private previousSteerInput = 0;
   private flickLoad = 0;
   private cameraOrbit = 0;
-  private cameraElevation = Math.asin(3.6 / 9.2);
+  private cameraElevation = CAMERA_ELEVATION;
+  private cameraHeading = 0;
+  private cameraHeight = 0;
   private cameraZoom = 1;
   private drivingEnabled = false;
   private driftModeEnabled = false;
+  private tcsEnabled = true;
+  private tcsActive = false;
   private driftModeBlend = 0;
   private handbrakeGripBlend = 0;
   private cameraPointerId: number | null = null;
@@ -108,18 +199,20 @@ export class DriveEngine {
   private telemetryElapsed = 0;
   private wheelTravel = 0;
   private rearWheelTravel = 0;
-  private burnoutWheelSpin = 0;
+  private readonly drivetrain: Drivetrain;
+  private rearSpin = 0;
+  private frontSpin = 0;
   private burnoutActive = false;
   private driftValue = 0;
   private readonly forward = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
   private readonly cameraTarget = new THREE.Vector3();
-  private readonly cameraDesired = new THREE.Vector3();
   private readonly previousCarPosition = new THREE.Vector3();
   private readonly speedGateCooldowns = new Map<string, number>();
   private drivingElapsed = 0;
   private readonly skidMarks: THREE.InstancedMesh;
   private readonly skidDummy = new THREE.Object3D();
+  private readonly skidSlope = new THREE.Vector2();
   private readonly skidPreviousPositions: [THREE.Vector3, THREE.Vector3] = [new THREE.Vector3(), new THREE.Vector3()];
   private readonly skidCurrentPositions: [THREE.Vector3, THREE.Vector3] = [new THREE.Vector3(), new THREE.Vector3()];
   private readonly skidModelLocalPositions: [THREE.Vector3, THREE.Vector3] = [new THREE.Vector3(), new THREE.Vector3()];
@@ -133,17 +226,25 @@ export class DriveEngine {
   private skidCount = 0;
   private skidDistance = 0;
   private static readonly skidCapacity = 300;
-  private static readonly smokeCapacity = 512;
-  private readonly tireSmoke: THREE.Points;
-  private readonly smokePositions = new Float32Array(DriveEngine.smokeCapacity * 3);
-  private readonly smokeSizes = new Float32Array(DriveEngine.smokeCapacity);
-  private readonly smokeOpacities = new Float32Array(DriveEngine.smokeCapacity);
-  private readonly smokeAges = new Float32Array(DriveEngine.smokeCapacity).fill(-1);
-  private readonly smokeLifetimes = new Float32Array(DriveEngine.smokeCapacity);
-  private readonly smokeStrengths = new Float32Array(DriveEngine.smokeCapacity);
-  private readonly smokeVelocities = Array.from({ length: DriveEngine.smokeCapacity }, () => new THREE.Vector3());
-  private smokeIndex = 0;
+  private readonly tireSmoke = new TireSmoke();
+  // Body on four springs: heave above the flat map, pitch (+ nose up), roll (+ right side up).
+  private bodyHeight = 0;
+  private heaveVelocity = 0;
+  private bodyPitch = 0;
+  private pitchRate = 0;
+  private bodyRoll = 0;
+  private rollRate = 0;
+  private airborne = false;
+  private readonly wheelGround = [0, 0, 0, 0];
+  private readonly suspensionTravel = [0, 0, 0, 0];
+  private readonly previousVelocity = new THREE.Vector3();
+  private readonly groundSlope = new THREE.Vector2();
+  private readonly shadowRight = new THREE.Vector3();
+  private readonly shadowUp = new THREE.Vector3();
   private smokeEmitElapsed = 0;
+  private smokeBuild = 0;
+  // Smoke emitter ids: 0-1 local rear wheels, 2-3 local fronts, remotes take pairs after.
+  private nextSmokeEmitter = 4;
   private readonly ambient: THREE.HemisphereLight;
   private readonly resizeObserver: ResizeObserver;
 
@@ -155,6 +256,7 @@ export class DriveEngine {
     callbacks: EngineCallbacks,
   ) {
     this.vehicle = vehicle;
+    this.drivetrain = new Drivetrain(vehicle);
     this.mapId = mapId;
     this.settings = { ...settings };
     this.callbacks = callbacks;
@@ -163,16 +265,24 @@ export class DriveEngine {
     this.ambient = new THREE.HemisphereLight('#e4f0e8', '#59624f', 2.15);
     this.scene.add(this.ambient);
     this.sun = new THREE.DirectionalLight('#fff1d5', 3.1);
-    this.sun.position.set(220, 160, -60);
-    this.sun.target.position.set(300, 0, 0);
     this.scene.add(this.sun.target);
     this.sun.castShadow = true;
-    this.sun.shadow.camera.left = -600;
-    this.sun.shadow.camera.right = 600;
-    this.sun.shadow.camera.top = 310;
-    this.sun.shadow.camera.bottom = -310;
+    this.sun.shadow.camera.left = -SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.right = SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.top = SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.bottom = -SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.near = 1;
+    this.sun.shadow.camera.far = SUN_OFFSET.length() + 120;
     this.sun.shadow.bias = -0.0003;
+    this.sun.shadow.camera.updateProjectionMatrix();
+    // Light-space axes used to snap the moving shadow camera to whole texels,
+    // which keeps shadow edges from shimmering while the car drives.
+    const sunForward = SUN_OFFSET.clone().negate().normalize();
+    this.shadowRight.crossVectors(sunForward, new THREE.Vector3(0, 1, 0)).normalize();
+    this.shadowUp.crossVectors(this.shadowRight, sunForward).normalize();
     this.scene.add(this.sun);
+    // Yaw first, then pitch/roll in the car's own frame.
+    this.carRoot.rotation.order = 'YXZ';
     this.scene.add(this.carRoot);
     this.skidMarks = new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.12, 0.018, 1.25),
@@ -185,45 +295,18 @@ export class DriveEngine {
     this.skidMarks.frustumCulled = false;
     this.skidMarks.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.skidMarks);
-    const smokeGeometry = new THREE.BufferGeometry();
-    smokeGeometry.setAttribute('position', new THREE.BufferAttribute(this.smokePositions, 3).setUsage(THREE.DynamicDrawUsage));
-    smokeGeometry.setAttribute('aSize', new THREE.BufferAttribute(this.smokeSizes, 1).setUsage(THREE.DynamicDrawUsage));
-    smokeGeometry.setAttribute('aOpacity', new THREE.BufferAttribute(this.smokeOpacities, 1).setUsage(THREE.DynamicDrawUsage));
-    this.tireSmoke = new THREE.Points(smokeGeometry, new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      toneMapped: false,
-      vertexShader: `
-        attribute float aSize;
-        attribute float aOpacity;
-        varying float vOpacity;
-        void main() {
-          vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-          gl_Position = projectionMatrix * viewPosition;
-          gl_PointSize = clamp(aSize * (260.0 / max(-viewPosition.z, 0.1)), 2.0, 90.0);
-          vOpacity = aOpacity;
-        }
-      `,
-      fragmentShader: `
-        varying float vOpacity;
-        void main() {
-          float radius = length(gl_PointCoord - vec2(0.5)) * 2.0;
-          float softCloud = exp(-radius * radius * 4.2) * (1.0 - smoothstep(0.12, 1.0, radius));
-          gl_FragColor = vec4(vec3(0.70, 0.72, 0.70), softCloud * vOpacity);
-        }
-      `,
-    }));
-    this.tireSmoke.frustumCulled = false;
-    this.tireSmoke.renderOrder = 2;
-    this.tireSmoke.visible = this.settings.effects;
-    this.scene.add(this.tireSmoke);
+    this.tireSmoke.mesh.visible = this.settings.effects;
+    this.scene.add(this.tireSmoke.mesh);
     this.worldData = buildWorld(mapId, this.settings);
     this.scene.add(this.worldData.root);
     this.visual = createVehicleVisual(vehicle);
     this.carRoot.add(this.visual.root);
-    void installGeneratedModel(this.visual, vehicle);
+    this.initialModel = installGeneratedModel(this.visual, vehicle);
     this.resetCar();
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    // MSAA is fixed when the WebGL context is created, so a quality change
+    // toggles it only after the next page load.
+    const antialias = this.settings.quality === 'high' || this.settings.quality === 'ultra';
+    this.renderer = new THREE.WebGLRenderer({ antialias, powerPreference: 'high-performance' });
     const shadowResolution = Math.min(shadowMapResolution(this.settings.quality), this.renderer.capabilities.maxTextureSize);
     this.sun.shadow.mapSize.set(shadowResolution, shadowResolution);
     this.renderer.setPixelRatio(renderPixelRatio(this.settings.quality, this.settings.resolutionScale));
@@ -233,6 +316,9 @@ export class DriveEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.14;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    // The offscreen target does not get the canvas' MSAA, so ask for its own.
+    this.motionBlur = new MotionBlur(this.renderer, antialias ? 4 : 0);
+    this.lampBloom = new LampBloom(this.renderer);
     this.renderer.domElement.className = 'drive-canvas';
     this.renderer.domElement.setAttribute('aria-label', 'Sürüş alanı');
     this.renderer.domElement.addEventListener('wheel', this.onCameraWheel, { passive: false });
@@ -261,9 +347,14 @@ export class DriveEngine {
       this.callbacks.onEscape();
       return;
     }
-    if (key === 't') {
+    if (key === 'm') {
       event.preventDefault();
       this.callbacks.onDevCode();
+      return;
+    }
+    if (key === 't') {
+      event.preventDefault();
+      if (!event.repeat) this.callbacks.onToggleTcs();
       return;
     }
     if (key === 'e' || key === 'q') {
@@ -383,12 +474,19 @@ export class DriveEngine {
 
   isDriftModeEnabled(): boolean { return this.driftModeEnabled; }
 
+  toggleTcs(): boolean {
+    this.tcsEnabled = !this.tcsEnabled;
+    return this.tcsEnabled;
+  }
+
   setMultiplayer(client: MultiplayerClient): void {
     this.multiplayer = client;
   }
 
   setRemotePlayers(players: MultiplayerPlayer[]): void {
-    const currentIds = new Set(players.map((player) => player.id));
+    // Players driving another map are not drawn here.
+    // A server that predates map ids sends none: show those players rather than nobody.
+    const currentIds = new Set(players.filter((player) => (player.mapId ?? this.mapId) === this.mapId).map((player) => player.id));
     for (const [id, remote] of this.remoteVehicles) {
       if (currentIds.has(id)) continue;
       this.scene.remove(remote.root);
@@ -396,7 +494,7 @@ export class DriveEngine {
       this.remoteVehicles.delete(id);
     }
     for (const player of players) {
-      if (player.id === this.multiplayer?.localPlayerId) continue;
+      if (player.id === this.multiplayer?.localPlayerId || !currentIds.has(player.id)) continue;
       const existing = this.remoteVehicles.get(player.id);
       if (existing && existing.target.vehicleId !== player.vehicleId) {
         this.scene.remove(existing.root);
@@ -446,8 +544,10 @@ export class DriveEngine {
       this.yawRate = 0;
       this.frontWheelAngle = 0;
       this.driftValue = 0;
+      this.drivetrain.reset();
+      setVehicleLights(this.visual, false, false);
       this.incomeClock.reset();
-      this.callbacks.onTelemetry({ speedKmh: 0, gear: this.gear, rpm: 850, drifting: false });
+      this.callbacks.onTelemetry({ speedKmh: 0, gear: this.gear, rpm: 850, drifting: false, tcsActive: false });
     }
   }
 
@@ -457,7 +557,7 @@ export class DriveEngine {
     this.velocity.set(0, 0, 0);
     this.wheelTravel = 0;
     this.rearWheelTravel = 0;
-    this.burnoutWheelSpin = 0;
+    this.drivetrain.setVehicle(vehicle);
     this.skidModelPositionsReady = false;
     this.incomeClock.reset();
     this.clearSkids();
@@ -470,17 +570,90 @@ export class DriveEngine {
     void installGeneratedModel(this.visual, vehicle);
   }
 
-  setMap(mapId: MapId): void {
+  /** Switches map; resolves once a map that loads in the background is in place. */
+  async setMap(mapId: MapId, onProgress: (share: number, label: string) => void = () => undefined): Promise<void> {
     if (this.mapId === mapId) return;
     this.mapId = mapId;
     this.sceneNeedsRender = true;
     this.scene.remove(this.worldData.root);
     disposeObject(this.worldData.root);
-    this.worldData = buildWorld(mapId, this.settings);
-    this.scene.add(this.worldData.root);
+    const world = buildWorld(mapId, this.settings);
+    this.worldData = world;
+    this.scene.add(world.root);
     this.clearSkids();
+    this.tireSmoke.clear();
     this.applyMapPalette();
     this.resetCar();
+    let settled = false;
+    void world.ready.finally(() => { settled = true; });
+    await new Promise<void>((resolve) => {
+      const poll = (): void => {
+        onProgress(0.05 + 0.85 * world.loadProgress(), MAP_LABELS[mapId] + ' yükleniyor');
+        if (settled) resolve();
+        else requestAnimationFrame(poll);
+      };
+      poll();
+    });
+    // Another map was chosen meanwhile.
+    if (this.worldData !== world) return;
+    onProgress(0.94, 'Harita hazırlanıyor');
+    await this.finishWorldLoad();
+    this.sceneNeedsRender = true;
+  }
+
+  /**
+   * Loads what the first drive needs: the active car's model, the engine
+   * sounds, and every shader of the scene, then draws one frame. Afterwards
+   * driving starts without hitches or a car popping in.
+   */
+  async prepare(onProgress: (share: number, label: string) => void): Promise<void> {
+    const audio = this.vehicleAudio.prefetch();
+    let modelSettled = false;
+    void this.initialModel.finally(() => { modelSettled = true; });
+    const world = this.worldData;
+    let worldSettled = false;
+    void world.ready.finally(() => { worldSettled = true; });
+    // A map that streams its model weighs more than the car.
+    const worldWeight = world.loadProgress() < 1 ? 0.6 : 0;
+    const giveUpAt = performance.now() + MODEL_LOAD_TIMEOUT_MS;
+    await new Promise<void>((resolve) => {
+      const poll = (): void => {
+        const modelDone = modelSettled || performance.now() > giveUpAt;
+        const share = (modelDone ? 1 : modelDownloadProgress(this.vehicle)) * (1 - worldWeight) + world.loadProgress() * worldWeight;
+        onProgress(0.04 + 0.76 * share, modelDone ? MAP_LABELS[this.mapId] + ' yükleniyor' : this.vehicle.shortName + ' yükleniyor');
+        if (modelDone && worldSettled) resolve();
+        else requestAnimationFrame(poll);
+      };
+      poll();
+    });
+    onProgress(0.84, 'Sesler yükleniyor');
+    await audio;
+    onProgress(0.92, 'Harita hazırlanıyor');
+    await this.finishWorldLoad();
+  }
+
+  // Car on the spawn and every shader of the scene compiled, then one frame drawn.
+  private async finishWorldLoad(): Promise<void> {
+    this.resetCar();
+    // Compile hidden parts too (lit lamps, brake glow), so the first brake does not hitch.
+    setVehicleLights(this.visual, true, true);
+    await this.renderer.compileAsync(this.scene, this.camera);
+    this.lampBloom.render(this.scene, this.camera);
+    setVehicleLights(this.visual, false, false);
+    // Upload every texture now; otherwise each one uploads the first time it
+    // comes into view, and the drive stutters as new parts of the map appear.
+    const textures = new Set<THREE.Texture>();
+    this.scene.traverse((object) => {
+      const material = (object as THREE.Mesh).material;
+      if (!material) return;
+      for (const entry of Array.isArray(material) ? material : [material]) {
+        for (const value of Object.values(entry)) if ((value as THREE.Texture | null)?.isTexture) textures.add(value as THREE.Texture);
+      }
+    });
+    for (const texture of textures) this.renderer.initTexture(texture);
+    this.motionBlur.compile();
+    this.lampBloom.compile();
+    this.renderScene();
   }
 
   setSettings(settings: GameSettings): void {
@@ -496,13 +669,16 @@ export class DriveEngine {
       this.sun.shadow.mapSize.set(shadowResolution, shadowResolution);
     }
     this.skidMarks.visible = settings.effects;
-    this.tireSmoke.visible = settings.effects;
+    this.tireSmoke.mesh.visible = settings.effects;
+    if (!settings.effects) this.tireSmoke.clear();
     if (!settings.effects) this.clearSkids();
     this.ambient.intensity = settings.quality === 'low' ? 1.7 : 2.15;
     this.sun.intensity = settings.quality === 'low' ? 2.4 : 3.1;
     this.applyMapPalette();
     this.scene.traverse((object) => {
-      if ((object as THREE.Mesh).isMesh) object.castShadow = settings.shadows && settings.quality !== 'low';
+      if ((object as THREE.Mesh).isMesh) {
+        object.castShadow = settings.shadows && settings.quality !== 'low' && object.userData.castsShadow !== false;
+      }
     });
     this.resize();
   }
@@ -516,26 +692,60 @@ export class DriveEngine {
     this.yaw = this.worldData.spawnYaw;
     this.yawRate = 0;
     this.frontWheelAngle = 0;
+    this.drivetrain.reset();
     this.previousSteerInput = 0;
     this.flickLoad = 0;
     this.velocity.set(0, 0, 0);
     this.previousCarPosition.copy(this.worldData.spawn);
     this.speedGateCooldowns.clear();
     this.drivingElapsed = 0;
-    this.carRoot.rotation.y = this.yaw;
-    this.carRoot.position.y = 0.015;
-    this.camera.position.set(this.carRoot.position.x - 11, 7.3, this.carRoot.position.z);
-    this.camera.lookAt(this.carRoot.position.x, 1.2, this.carRoot.position.z);
+    this.carRoot.rotation.set(0, this.yaw, 0);
+    // Rest on the ground under the spawn (maps with terrain spawn up a hill).
+    const spawnGround = groundHeightAt(this.worldData, this.carRoot.position.x, this.carRoot.position.z);
+    this.carRoot.position.y = spawnGround + 0.015;
+    this.bodyHeight = spawnGround;
+    this.heaveVelocity = 0;
+    this.bodyPitch = 0;
+    this.pitchRate = 0;
+    this.bodyRoll = 0;
+    this.rollRate = 0;
+    this.airborne = false;
+    this.wheelGround.fill(spawnGround);
+    this.suspensionTravel.fill(0);
+    this.previousVelocity.set(0, 0, 0);
+    // Back to the default chase framing, snapped so the first frame is already there.
+    this.cameraOrbit = 0;
+    this.cameraElevation = CAMERA_ELEVATION;
+    this.cameraZoom = 1;
+    this.updateCamera(0, true);
     this.incomeClock.reset();
     this.clearSkids();
+    this.tireSmoke.clear();
+    this.smokeBuild = 0;
+    this.updateShadowFrustum();
+  }
+
+  private updateShadowFrustum(): void {
+    const texel = (SHADOW_HALF_EXTENT * 2) / this.sun.shadow.mapSize.width;
+    const car = this.carRoot.position;
+    const right = car.dot(this.shadowRight);
+    const up = car.dot(this.shadowUp);
+    this.sun.target.position.set(car.x, car.y, car.z)
+      .addScaledVector(this.shadowRight, Math.round(right / texel) * texel - right)
+      .addScaledVector(this.shadowUp, Math.round(up / texel) * texel - up);
+    this.sun.position.copy(this.sun.target.position).add(SUN_OFFSET);
   }
 
   private applyMapPalette(): void {
     const color = '#a9b9ae';
     this.scene.background = new THREE.Color(color);
-    this.scene.fog = this.settings.quality === 'low'
+    const fog = this.settings.quality === 'low'
       ? new THREE.Fog(color, 80, 520)
       : new THREE.Fog(color, 108, this.settings.quality === 'ultra' ? 1200 : this.settings.quality === 'high' ? 950 : 700);
+    this.scene.fog = fog;
+    // Past fog.far everything is exactly the background colour, so do not draw it.
+    this.camera.far = fog.far + 20;
+    this.camera.updateProjectionMatrix();
   }
 
   private resize(): void {
@@ -544,6 +754,8 @@ export class DriveEngine {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    this.motionBlur.setSize();
+    this.lampBloom.setSize();
   }
 
   private frame = (time: number): void => {
@@ -552,7 +764,10 @@ export class DriveEngine {
       if (this.drivingEnabled) this.updateDriving(dt);
       else this.updateTireSmoke(dt, 0);
       this.updateRemoteVehicles(dt);
-      if (this.drivingEnabled) this.updateCamera(dt);
+      if (this.drivingEnabled) {
+        this.updateCamera(dt);
+        this.updateShadowFrustum();
+      }
       const telemetry = this.makeTelemetry();
       this.vehicleAudio.update({
         dt,
@@ -575,8 +790,10 @@ export class DriveEngine {
             steeringAngle: this.frontWheelAngle,
             speedKmh: telemetry.speedKmh,
             drifting: telemetry.drifting,
-            burnout: this.burnoutActive,
-            rearWheelSpinRate: this.burnoutWheelSpin,
+            burnout: this.burnoutActive || Math.max(this.rearSpin, this.frontSpin) > 0.35,
+            // The server drops values past ±36.
+            mapId: this.mapId,
+            rearWheelSpinRate: THREE.MathUtils.clamp(this.drivetrain.rearWheelSpeed - this.velocity.dot(this.forward), -36, 36),
           };
           this.multiplayer.sendState(state);
         }
@@ -591,7 +808,7 @@ export class DriveEngine {
       this.renderElapsed += dt;
       const limit = this.settings.fpsLimit === 0 ? 0 : 1 / this.settings.fpsLimit;
       if (this.sceneNeedsRender || (this.drivingEnabled && (limit === 0 || this.renderElapsed >= limit))) {
-        this.renderer.render(this.scene, this.camera);
+        this.renderScene();
         this.sceneNeedsRender = false;
         this.renderElapsed = 0;
       }
@@ -603,10 +820,12 @@ export class DriveEngine {
   private updateDriving(dt: number): void {
     this.previousCarPosition.copy(this.carRoot.position);
     this.drivingElapsed += dt;
-    const gas = this.isDown('w');
-    const brake = this.isDown('s');
-    const steerInput = (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0);
-    const handbrake = this.isDown(' ');
+    // In the air the tyres have nothing to push against.
+    const grounded = !this.airborne;
+    const gas = grounded && this.isDown('w');
+    const brake = grounded && this.isDown('s');
+    const steerInput = grounded ? (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0) : 0;
+    const handbrake = grounded && this.isDown(' ');
     this.driftModeBlend = approach(this.driftModeBlend, this.driftModeEnabled ? 1 : 0, dt * 2.2);
     this.handbrakeGripBlend = approach(this.handbrakeGripBlend, handbrake ? 1 : 0, dt * (handbrake ? 8 : 2.8));
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
@@ -616,28 +835,36 @@ export class DriveEngine {
     if (this.settings.transmissionMode === 'automatic') this.updateAutomaticTransmission(longitudinal, gas);
     const burnout = gas && brake && this.velocity.length() < 1.15;
     this.burnoutActive = burnout;
+    const drive = this.drivetrain.step({
+      dt,
+      gear: this.gear,
+      throttle: gas && (!brake || burnout),
+      handbrake,
+      burnout,
+      tcs: this.tcsEnabled,
+      grounded,
+      forwardSpeed: longitudinal,
+      lateralSpeed: lateral,
+    });
+    this.rearSpin = drive.rearSpin;
+    this.frontSpin = drive.frontSpin;
+    this.tcsActive = drive.tcsActive;
 
     if (brake) {
+      // During a burnout the front brakes hold the car while the driven wheels spin.
       if (Math.abs(longitudinal) > 0.33) {
         longitudinal = approach(longitudinal, 0, this.vehicle.braking * dt);
       } else {
         longitudinal = 0;
       }
-    } else if (gas && this.gear >= 1) {
-      const ratio = GEAR_SPEED[this.gear];
-      const limit = this.vehicle.maxSpeed / ECONOMY.kmhPerUnit * ratio;
-      const torque = GEAR_TORQUE[this.gear];
-      const launchSpeed = GEAR_LAUNCH_SPEED_KMH[this.gear];
-      const launchTorque = launchSpeed > 0
-        ? THREE.MathUtils.smoothstep(Math.abs(longitudinal) * ECONOMY.kmhPerUnit, 0, launchSpeed)
-        : 1;
-      longitudinal = Math.min(limit, longitudinal + this.vehicle.acceleration * ACCELERATION_SCALE * torque * launchTorque * dt);
-    } else if (gas && this.gear === -1) {
-      longitudinal = Math.max(-11, longitudinal - this.vehicle.acceleration * ACCELERATION_SCALE * 0.48 * dt);
-    } else if (this.gear === 0) {
-      longitudinal *= Math.exp(-0.08 * dt);
     } else {
-      longitudinal *= Math.exp(-0.16 * dt);
+      longitudinal += drive.accel * dt;
+      // Rolling and air resistance always, engine braking off throttle in gear.
+      // Small enough that a downhill run (gravity, applied by the suspension)
+      // really carries the car faster.
+      const resistance = ROLLING_RESISTANCE + this.drivetrain.airDrag * longitudinal * longitudinal
+        + (!gas && this.gear !== 0 ? ENGINE_BRAKING / Math.pow(Math.max(1, Math.abs(this.gear)), 0.6) : 0);
+      longitudinal = approach(longitudinal, 0, resistance * dt);
     }
 
     // Keep world momentum independent from body heading while the tire forces
@@ -650,8 +877,14 @@ export class DriveEngine {
       : 0;
     this.flickLoad = Math.max(reversalImpulse, this.flickLoad * Math.exp(-dt / 0.28));
     this.previousSteerInput = steerInput;
-    const wheelbase = Math.max(2, this.vehicle.length * 0.58);
-    const maxSteeringAngle = Math.min(0.78, this.vehicle.steering * 0.5);
+    // Steering geometry stays tuned to the catalog size, so scaling the cars up
+    // does not widen their turning circle.
+    const wheelbase = Math.max(2, this.vehicle.length / VEHICLE_SCALE * 0.58);
+    // Speed-sensitive steering: full lock when parking, a few degrees at speed,
+    // as a driver really steers. Drift mode keeps more lock for counter-steer.
+    const steeringSpeedScale = 1 / (1 + Math.pow(speed / STEERING_FADE_SPEED, 1.6));
+    const maxSteeringAngle = Math.min(0.78, this.vehicle.steering * 0.5)
+      * THREE.MathUtils.lerp(steeringSpeedScale, Math.max(steeringSpeedScale, 0.6), this.driftModeBlend);
     // Preserve A/D steering direction; drift yaw follows this filtered wheel angle.
     const steeringTarget = steerInput * maxSteeringAngle;
     const steeringReleased = Math.abs(steerInput) <= 0.05;
@@ -660,19 +893,29 @@ export class DriveEngine {
       : THREE.MathUtils.lerp(3.8, 2.8, this.driftModeBlend);
     this.frontWheelAngle = approach(this.frontWheelAngle, steeringTarget, steeringResponse * this.vehicle.handling * dt);
     const yawSteeringAngle = THREE.MathUtils.lerp(steeringTarget, this.frontWheelAngle, this.driftModeBlend);
-    const steeringYawRate = longitudinal / wheelbase * Math.tan(yawSteeringAngle);
+    // Drift'te dönüş hızı yalnızca ileri hızdan değil toplam hızdan hesaplanır;
+    // aksi halde araç yan giderken ileri hız düşüp dönüş durur (açı sınırı).
+    const yawSpeed = THREE.MathUtils.lerp(longitudinal, Math.max(longitudinal, speed * DRIFT_TUNING.yawUsesTotalSpeed), this.driftModeBlend);
+    // Spinning front tyres have little left for turning: power understeer.
+    const steeringYawRate = yawSpeed / wheelbase * Math.tan(yawSteeringAngle) * (1 - 0.45 * this.frontSpin);
 
     const normalLateralGrip = this.vehicle.handling * (steeringDemand < 0.05 ? 11.5 : 9.8);
     // The old drift setting recovered lateral velocity in roughly 0.15–0.25 s,
     // which made a lifted throttle feel like an invisible brake. Keep some
     // stabilizing tire response, but let the car carry its slide long enough
     // for throttle and counter-steer to shape it.
-    const driftLateralGrip = this.vehicle.handling * Math.max(1.15, 2.7 - steeringDemand * 0.9 - (gas ? 0.55 : 0.2) + (brake ? 0.35 : 0));
+    const driftLateralGrip = this.vehicle.handling * Math.max(
+      DRIFT_TUNING.minGrip,
+      DRIFT_TUNING.baseGrip - steeringDemand * 0.9 - (0.2 + (DRIFT_TUNING.gasGripLoss - 0.2) * this.rearSpin) + (brake ? 0.35 : 0),
+    );
     let lateralRecovery = THREE.MathUtils.lerp(normalLateralGrip, driftLateralGrip, this.driftModeBlend);
     if (brake && speed > 7) {
       lateralRecovery *= 1 - 0.14 * THREE.MathUtils.clamp((speed - 7) / 16, 0, 1) * steeringDemand;
     }
     lateralRecovery *= 1 - this.flickLoad * (0.06 + 0.08 * this.driftModeBlend);
+    // Rear tyres spinning under power lose side grip: power oversteer. Without
+    // enough torque at the current gear and rpm the tyres hook up and the slide dies.
+    lateralRecovery *= 1 - this.rearSpin * THREE.MathUtils.lerp(0.4, 0.55, this.driftModeBlend);
     if (speed > 4 && this.handbrakeGripBlend > 0) {
       const handbrakeGrip = this.vehicle.handling * THREE.MathUtils.lerp(2.25, 1.3, this.driftModeBlend);
       lateralRecovery = THREE.MathUtils.lerp(lateralRecovery, Math.min(lateralRecovery, handbrakeGrip), this.handbrakeGripBlend);
@@ -687,6 +930,10 @@ export class DriveEngine {
       const counterSteerGrip = THREE.MathUtils.lerp(3.2, 0.2, this.driftModeBlend);
       lateralRecovery += this.vehicle.handling * counterSteerGrip * Math.abs(steerInput);
     }
+    // Kayma açısı büyüdükçe tutuş azalır: araç açıyı korur, kendiliğinden toparlanmaz.
+    const slipRatio = Math.abs(lateral) / Math.max(Math.abs(longitudinal), 4);
+    lateralRecovery *= 1 - DRIFT_TUNING.slipGripLoss
+      * THREE.MathUtils.clamp(slipRatio * DRIFT_TUNING.slipGripSensitivity, 0, 1) * this.driftModeBlend;
 
     const releaseYawAssist = steeringReleased ? 0.1 * (1 - this.driftModeBlend) : 0;
     const counterSteerYaw = counterSteering ? 0.1 * Math.abs(steerInput) : 0;
@@ -695,18 +942,24 @@ export class DriveEngine {
     const driftCounterYaw = counterSteerYaw * (1 - 0.6 * this.driftModeBlend);
     const slipYawRate = lateral / wheelbase * (
       releasedSlipYaw + 0.12 * this.handbrakeGripBlend + releaseYawAssist + driftCounterYaw
-    );
+    ) * (1 - DRIFT_TUNING.selfAlignCut * this.driftModeBlend);
     const handbrakeTurn = handbrake && speed > 5 && Math.abs(steerInput) > 0.05;
-    const maximumYawRate = Math.min(
-      handbrakeTurn ? 1.9 : 2.1 + 0.3 * this.driftModeBlend,
-      this.vehicle.handling * (handbrakeTurn ? 30 : 40 + 5 * this.driftModeBlend) / Math.max(speed, 2.5),
-    );
+    // On grip the tyres can only bend the path as hard as their friction
+    // allows (~1.1 g): yaw rate = lateral acceleration / speed. A slide (drift
+    // mode, handbrake) rotates the body beyond that, as before.
+    const gripLateralAccel = GRAVITY * (GRIP_LATERAL_G + 0.2 * this.vehicle.handling);
+    const slideYawCap = this.vehicle.handling * (handbrakeTurn ? 30 : 45) / Math.max(speed, 2.5);
+    const yawCapBySpeed = handbrakeTurn
+      ? slideYawCap
+      : THREE.MathUtils.lerp(gripLateralAccel / Math.max(speed, 2.5), slideYawCap, this.driftModeBlend);
+    const maximumYawRate = Math.min(handbrakeTurn ? 1.9 : 2.1 + 0.3 * this.driftModeBlend, yawCapBySpeed);
     const yawRateLimit = Math.min(2.4, maximumYawRate * (handbrakeTurn ? 1.5 : 1));
     const driftYawRateLimit = yawRateLimit * (1 + 0.65 * this.driftModeBlend);
     const targetYawRate = THREE.MathUtils.clamp(steeringYawRate + slipYawRate, -driftYawRateLimit, driftYawRateLimit);
     const speedLoad = THREE.MathUtils.clamp(speed / 35, 0, 1);
-    const normalYawAcceleration = THREE.MathUtils.lerp(8, 4.8, speedLoad);
-    const driftYawAcceleration = THREE.MathUtils.lerp(4.4, 3.2, speedLoad);
+    // Yaw builds up more gently at speed: no instant darting.
+    const normalYawAcceleration = THREE.MathUtils.lerp(7.5, 3.6, speedLoad);
+    const driftYawAcceleration = THREE.MathUtils.lerp(DRIFT_TUNING.yawAccelLow, DRIFT_TUNING.yawAccelHigh, speedLoad);
     const yawAcceleration = this.vehicle.handling * THREE.MathUtils.lerp(normalYawAcceleration, driftYawAcceleration, this.driftModeBlend);
     const releasedYawAcceleration = this.vehicle.handling * 1.4;
     const yawRateResponse = THREE.MathUtils.lerp(
@@ -714,8 +967,17 @@ export class DriveEngine {
       releasedYawAcceleration,
       steeringReleased ? this.driftModeBlend : 0,
     );
-    this.yawRate = approach(this.yawRate, targetYawRate, yawRateResponse * dt);
+    if (grounded) this.yawRate = approach(this.yawRate, targetYawRate, yawRateResponse * dt);
+    const previousYaw = this.yaw;
     this.yaw += this.yawRate * dt;
+    if (grounded) {
+      // Turn about the rear axle, as a car on grip does: the rear follows its
+      // path and the nose swings with the front wheels. A slide pivots the
+      // body closer to its middle.
+      const pivotBehind = this.vehicle.length * REAR_AXLE_SHARE * (1 - Math.min(1, this.driftValue * 1.5));
+      this.carRoot.position.x += (Math.sin(this.yaw) - Math.sin(previousYaw)) * pivotBehind;
+      this.carRoot.position.z += (Math.cos(this.yaw) - Math.cos(previousYaw)) * pivotBehind;
+    }
 
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
@@ -723,7 +985,20 @@ export class DriveEngine {
     // gradually reduce lateral speed instead of snapping it to zero.
     longitudinal = this.velocity.dot(this.forward);
     lateral = this.velocity.dot(this.right);
-    lateral *= Math.exp(-lateralRecovery * dt);
+    const lateralBefore = lateral;
+    if (grounded) lateral *= Math.exp(-lateralRecovery * dt);
+    // Kaybolan yanal hızın bir kısmı ileri hıza döner (gazla kayarken hız korunur).
+    // Araç geriye doğru kayıyorsa veya frendeyse uygulanmaz.
+    if (longitudinal > 0 && !brake) {
+      longitudinal += Math.abs(lateralBefore - lateral) * DRIFT_TUNING.slideDriveBoost
+        * this.driftModeBlend * (gas ? 0.3 + 0.7 * this.rearSpin : 0.3);
+    }
+    // Frende yanal hız da hızla söner (kilitlenmiş lastik gibi durur).
+    if (brake) lateral *= Math.exp(-DRIFT_TUNING.brakeLateralDecay * dt);
+    // Kayma sürtünmesi: gaz basılıyken az, değilken fazla.
+    longitudinal *= Math.exp(
+      -DRIFT_TUNING.slideDrag * Math.min(Math.abs(lateral), 14) * this.driftModeBlend * THREE.MathUtils.lerp(1, DRIFT_TUNING.slideDragGas, gas ? this.rearSpin : 0) * dt,
+    );
     const slipAngle = Math.atan2(Math.abs(lateral), Math.max(Math.abs(longitudinal), 1));
     const drifting = (handbrake || this.driftModeBlend > 0.15 || this.driftValue > 0.08)
       && speed > 6 && slipAngle > 0.12 && Math.abs(lateral) > 1.25;
@@ -739,18 +1014,149 @@ export class DriveEngine {
     this.carRoot.position.addScaledVector(this.velocity, dt);
     this.handleCollisions();
     this.checkSpeedGates();
-    this.carRoot.rotation.y = this.yaw;
-    this.carRoot.position.y = 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
-    this.updateSkids(drifting, slipAngle, speed);
-    this.wheelTravel += longitudinal * dt;
-    this.burnoutWheelSpin = approach(
-      this.burnoutWheelSpin,
-      burnout ? (this.gear === -1 ? -18 : 18) : 0,
-      dt * 28,
+    this.updateSuspension(dt);
+    this.carRoot.rotation.set(-this.bodyPitch, this.yaw, this.bodyRoll);
+    this.carRoot.position.y = this.bodyHeight + 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
+    // Skid marks are laid flat on the map, so only draw them there.
+    this.updateSkids((drifting || this.rearSpin > 0.3) && !this.airborne, slipAngle, speed);
+    this.wheelTravel += this.drivetrain.frontWheelSpeed * dt;
+    this.rearWheelTravel += this.drivetrain.rearWheelSpeed * dt;
+    const slideSmoke = drifting ? driftSeverity : 0;
+    this.updateTireSmoke(
+      dt,
+      this.airborne ? 0 : burnout ? 1 : Math.max(slideSmoke, this.rearSpin),
+      this.airborne ? 0 : this.frontSpin,
     );
-    this.rearWheelTravel += (longitudinal + this.burnoutWheelSpin) * dt;
-    this.updateTireSmoke(dt, burnout ? 1 : drifting ? driftSeverity : 0);
-    setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel);
+    // Görsel karşı direksiyon: kayarken ön tekerlekler aracın gittiği yöne bakar.
+    const slideWheelAngle = THREE.MathUtils.clamp(
+      Math.atan2(lateral, Math.max(longitudinal, 2)), -DRIFT_TUNING.counterSteerMax, DRIFT_TUNING.counterSteerMax,
+    );
+    const visualFrontAngle = THREE.MathUtils.lerp(this.frontWheelAngle, slideWheelAngle, Math.min(1, this.driftValue * 2.5));
+    setVehicleWheelSpin(this.visual, this.wheelTravel, visualFrontAngle, this.rearWheelTravel);
+    setVehicleSuspension(this.visual, this.suspensionTravel);
+    setVehicleLights(this.visual, this.isDown('s'), this.gear === -1);
+  }
+
+  /**
+   * Four independent spring-dampers carry the body. Each wheel reads the ground
+   * under it, so ramps lift the front axle first, launches happen when the
+   * wheels lose contact, and landings compress the springs. Measured body
+   * acceleration adds the usual weight transfer: squat, dive and roll.
+   */
+  private updateSuspension(dt: number): void {
+    const position = this.carRoot.position;
+    const wheels = this.visual.suspension;
+    if (wheels.length !== 4 || dt <= 0) return;
+
+    const centerGround = groundHeightAt(this.worldData, position.x, position.z, this.groundSlope);
+    if (!this.airborne) {
+      // A climb up the slope rises at most slope × distance travelled this frame.
+      const travel = Math.hypot(position.x - this.previousCarPosition.x, position.z - this.previousCarPosition.z);
+      if (centerGround - this.bodyHeight > MAX_STEP_UP + this.groundSlope.length() * travel) {
+        // Drove into the tall end of a ramp: stop like at a wall.
+        position.x = this.previousCarPosition.x;
+        position.z = this.previousCarPosition.z;
+        this.velocity.multiplyScalar(-0.2);
+        return;
+      }
+      // Gravity along the slope: slower uphill, faster rolling down.
+      this.velocity.x -= this.groundSlope.x * GRAVITY * dt;
+      this.velocity.z -= this.groundSlope.y * GRAVITY * dt;
+    }
+
+    // Body-frame acceleration for weight transfer, clamped so wall bounces do not kick the body.
+    const limit = SUSPENSION.maxInertialAccel;
+    const accelLong = THREE.MathUtils.clamp((this.velocity.dot(this.forward) - this.previousVelocity.dot(this.forward)) / dt, -limit, limit);
+    const accelLat = THREE.MathUtils.clamp((this.velocity.dot(this.right) - this.previousVelocity.dot(this.right)) / dt, -limit, limit);
+    this.previousVelocity.copy(this.velocity);
+
+    // Static load per wheel so the car rests level even when the axles are off-centre.
+    let frontZ = 0;
+    let rearZ = 0;
+    for (const wheel of wheels) {
+      if (wheel.z > 0) frontZ += wheel.z / 2;
+      else rearZ += wheel.z / 2;
+    }
+    const wheelbase = Math.max(frontZ - rearZ, 0.5);
+    const omega = 2 * Math.PI * SUSPENSION.frequencyHz;
+    const springRate = 0.25 * omega * omega;
+    const damperRate = 2 * SUSPENSION.dampingRatio * 0.25 * omega;
+    const pitchInertia = (SUSPENSION.pitchGyration * this.vehicle.length) ** 2;
+    const rollInertia = (SUSPENSION.rollGyration * this.vehicle.width) ** 2;
+    let springRollStiffness = 0;
+    for (const wheel of wheels) springRollStiffness += springRate * wheel.x * wheel.x;
+    const antiRollStiffness = springRollStiffness * SUSPENSION.antiRollShare;
+
+    const groundRate = [0, 0, 0, 0];
+    for (let i = 0; i < 4; i += 1) {
+      const wheel = wheels[i];
+      const ground = groundHeightAt(
+        this.worldData,
+        position.x + this.forward.x * wheel.z + this.right.x * wheel.x,
+        position.z + this.forward.z * wheel.z + this.right.z * wheel.x,
+      );
+      // A drop off a ramp edge is not a ground velocity the damper should feel.
+      groundRate[i] = ground >= this.wheelGround[i] ? (ground - this.wheelGround[i]) / dt : 0;
+      this.wheelGround[i] = ground;
+    }
+
+    const steps = Math.max(1, Math.ceil(dt / SUSPENSION.substep));
+    const h = dt / steps;
+    let contacts = 0;
+    for (let step = 0; step < steps; step += 1) {
+      let force = 0;
+      let pitchTorque = 0;
+      let rollTorque = 0;
+      let worstPenetration = 0;
+      contacts = 0;
+      for (let i = 0; i < 4; i += 1) {
+        const wheel = wheels[i];
+        const staticLoad = GRAVITY / 2 * (wheel.z > 0 ? -rearZ : frontZ) / wheelbase;
+        const corner = this.bodyHeight + wheel.z * this.bodyPitch + wheel.x * this.bodyRoll;
+        const compression = this.wheelGround[i] - corner;
+        const compressionRate = groundRate[i] - (this.heaveVelocity + wheel.z * this.pitchRate + wheel.x * this.rollRate);
+        let load = staticLoad + springRate * compression + damperRate * compressionRate;
+        if (compression > SUSPENSION.bumpTravel) {
+          load += springRate * SUSPENSION.bumpStopStiffness * (compression - SUSPENSION.bumpTravel)
+            + damperRate * SUSPENSION.bumpStopDamping * compressionRate;
+        }
+        // Springs only push; a wheel hanging below its full droop has left the ground.
+        if (compression <= -staticLoad / springRate || load <= 0) load = 0;
+        else contacts += 1;
+        worstPenetration = Math.max(worstPenetration, compression - SUSPENSION.hardLimit);
+        force += load;
+        pitchTorque += load * wheel.z;
+        rollTorque += load * wheel.x;
+      }
+      // Weight transfer acts through the tyres, so only while touching the ground.
+      if (contacts > 0) {
+        pitchTorque += accelLong * SUSPENSION.centerOfMassHeight;
+        rollTorque += accelLat * SUSPENSION.centerOfMassHeight - antiRollStiffness * this.bodyRoll;
+      } else {
+        const spinLoss = Math.exp(-SUSPENSION.airAngularDamping * h);
+        this.pitchRate *= spinLoss;
+        this.rollRate *= spinLoss;
+      }
+      this.heaveVelocity += (force - GRAVITY) * h;
+      this.pitchRate += pitchTorque / pitchInertia * h;
+      this.rollRate += rollTorque / rollInertia * h;
+      this.bodyHeight += this.heaveVelocity * h;
+      this.bodyPitch += this.pitchRate * h;
+      this.bodyRoll += this.rollRate * h;
+      if (worstPenetration > 0) {
+        // Never let the body sink through the ground on a hard landing.
+        this.bodyHeight += worstPenetration;
+        this.heaveVelocity = Math.max(0, this.heaveVelocity);
+      }
+    }
+    this.airborne = contacts === 0;
+
+    for (let i = 0; i < 4; i += 1) {
+      const wheel = wheels[i];
+      const staticLoad = GRAVITY / 2 * (wheel.z > 0 ? -rearZ : frontZ) / wheelbase;
+      const corner = this.bodyHeight + wheel.z * this.bodyPitch + wheel.x * this.bodyRoll;
+      this.suspensionTravel[i] = THREE.MathUtils.clamp(this.wheelGround[i] - corner, -staticLoad / springRate, SUSPENSION.hardLimit);
+    }
   }
 
   private checkSpeedGates(): void {
@@ -816,8 +1222,13 @@ export class DriveEngine {
       const scaleZ = THREE.MathUtils.clamp(spacing * 1.12 / 1.25, 0.5, 1.05);
       for (let wheel = 0; wheel < 2; wheel += 1) {
         this.skidInterpolatedPosition.copy(this.skidPreviousPositions[wheel]).lerp(this.skidCurrentPositions[wheel], t);
-        this.skidDummy.position.set(this.skidInterpolatedPosition.x, 0.024, this.skidInterpolatedPosition.z);
-        this.skidDummy.rotation.set(0, markYaw, 0);
+        const markX = this.skidInterpolatedPosition.x;
+        const markZ = this.skidInterpolatedPosition.z;
+        // Lie on the ground, tilted with its slope along the mark.
+        const markGround = groundHeightAt(this.worldData, markX, markZ, this.skidSlope);
+        const grade = this.skidSlope.x * Math.sin(markYaw) + this.skidSlope.y * Math.cos(markYaw);
+        this.skidDummy.position.set(markX, markGround + 0.024, markZ);
+        this.skidDummy.rotation.set(-Math.atan(grade), markYaw, 0, 'YXZ');
         this.skidDummy.scale.set(scaleX, 1, scaleZ);
         this.skidDummy.updateMatrix();
         this.skidMarks.setMatrixAt(this.skidIndex, this.skidDummy.matrix);
@@ -840,7 +1251,8 @@ export class DriveEngine {
     const root = new THREE.Group();
     const visual = createVehicleVisual(spec);
     root.add(visual.root);
-    root.position.set(player.x, 0.015, player.z);
+    root.position.set(player.x, groundHeightAt(this.worldData, player.x, player.z) + 0.015, player.z);
+    root.rotation.order = 'YXZ';
     root.rotation.y = player.yaw;
     this.scene.add(root);
     void installGeneratedModel(visual, spec);
@@ -848,10 +1260,13 @@ export class DriveEngine {
       target: player,
       root,
       visual,
+      spec,
       wheelTravel: 0,
       rearWheelTravel: 0,
       steeringAngle: Number.isFinite(player.steeringAngle) ? player.steeringAngle : 0,
       smokeEmitElapsed: 0,
+      smokeBuild: 0,
+      smokeEmitter: (this.nextSmokeEmitter += 2) - 2,
       previousX: player.x,
       previousZ: player.z,
     };
@@ -865,6 +1280,20 @@ export class DriveEngine {
       const target = remote.target;
       remote.root.position.x += (target.x - remote.root.position.x) * blend;
       remote.root.position.z += (target.z - remote.root.position.z) * blend;
+      // Sit on the ground and lean with it (positions carry no height or tilt).
+      const remoteYaw = remote.root.rotation.y;
+      const halfLength = remote.spec.length * 0.3;
+      const halfWidth = remote.spec.width * 0.4;
+      const { x: rx, z: rz } = remote.root.position;
+      const sinYaw = Math.sin(remoteYaw);
+      const cosYaw = Math.cos(remoteYaw);
+      const front = groundHeightAt(this.worldData, rx + sinYaw * halfLength, rz + cosYaw * halfLength);
+      const rear = groundHeightAt(this.worldData, rx - sinYaw * halfLength, rz - cosYaw * halfLength);
+      const right = groundHeightAt(this.worldData, rx + cosYaw * halfWidth, rz - sinYaw * halfWidth);
+      const left = groundHeightAt(this.worldData, rx - cosYaw * halfWidth, rz + sinYaw * halfWidth);
+      remote.root.position.y += ((front + rear + right + left) / 4 + 0.015 - remote.root.position.y) * blend;
+      remote.root.rotation.x += (-Math.atan2(front - rear, halfLength * 2) - remote.root.rotation.x) * blend;
+      remote.root.rotation.z += (Math.atan2(right - left, halfWidth * 2) - remote.root.rotation.z) * blend;
       const yawDelta = THREE.MathUtils.euclideanModulo(target.yaw - remote.root.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
       remote.root.rotation.y += yawDelta * blend;
       const targetSteeringAngle = Number.isFinite(target.steeringAngle) ? target.steeringAngle : 0;
@@ -878,11 +1307,14 @@ export class DriveEngine {
       remote.previousX = remote.root.position.x;
       remote.previousZ = remote.root.position.z;
       setVehicleWheelSpin(remote.visual, remote.wheelTravel, remote.steeringAngle, remote.rearWheelTravel);
+      remote.smokeBuild = advanceSmokeBuild(remote.smokeBuild, target.burnout && this.settings.effects, dt);
       if (target.burnout && this.settings.effects) {
         remote.smokeEmitElapsed += dt;
+        const vx = dt > 0 ? dx / dt : 0;
+        const vz = dt > 0 ? dz / dt : 0;
         while (remote.smokeEmitElapsed >= SMOKE_EMIT_INTERVAL) {
           remote.smokeEmitElapsed -= SMOKE_EMIT_INTERVAL;
-          this.emitRemoteTireSmoke(remote);
+          this.emitRemoteTireSmoke(remote, vx, vz);
         }
       } else {
         remote.smokeEmitElapsed = 0;
@@ -890,107 +1322,69 @@ export class DriveEngine {
     }
   }
 
-  private updateTireSmoke(dt: number, intensity: number): void {
-    const canEmit = this.settings.effects && intensity > 0.08;
-    if (canEmit) {
-      this.updateSkidWheelPositions();
+  // rearIntensity/frontIntensity 0..1: how hard each axle's tyres slide or spin.
+  private updateTireSmoke(dt: number, rearIntensity: number, frontIntensity = 0): void {
+    const sliding = this.settings.effects && Math.max(rearIntensity, frontIntensity) > 0.08;
+    this.smokeBuild = advanceSmokeBuild(this.smokeBuild, sliding, dt);
+    if (sliding) {
       this.smokeEmitElapsed += dt;
+      const density = smokeDensity(this.smokeBuild);
+      const rear = rearIntensity > 0.08 ? Math.max(0.4, rearIntensity) * density : 0;
+      const front = frontIntensity > 0.08 ? Math.max(0.4, frontIntensity) * density : 0;
+      if (rear > 0) this.updateSkidWheelPositions();
       while (this.smokeEmitElapsed >= SMOKE_EMIT_INTERVAL) {
         this.smokeEmitElapsed -= SMOKE_EMIT_INTERVAL;
-        const smokeIntensity = Math.max(0.4, intensity);
-        this.emitTireSmoke(0, smokeIntensity);
-        this.emitTireSmoke(1, smokeIntensity);
+        for (const wheel of [0, 1] as const) {
+          const side = wheel === 0 ? -1 : 1;
+          if (rear > 0) {
+            const position = this.skidCurrentPositions[wheel];
+            this.emitWheelSmoke(wheel, position.x, position.z, this.yaw, side, this.velocity.x, this.velocity.z, rear);
+          }
+          if (front > 0) {
+            const ahead = this.vehicle.length * 0.31;
+            const across = this.vehicle.width * 0.51 * side;
+            const x = this.carRoot.position.x + Math.sin(this.yaw) * ahead + Math.cos(this.yaw) * across;
+            const z = this.carRoot.position.z + Math.cos(this.yaw) * ahead - Math.sin(this.yaw) * across;
+            this.emitWheelSmoke(2 + wheel, x, z, this.yaw, side, this.velocity.x, this.velocity.z, front);
+          }
+        }
       }
     } else {
       this.smokeEmitElapsed = 0;
     }
-
-    for (let i = 0; i < DriveEngine.smokeCapacity; i += 1) {
-      const age = this.smokeAges[i];
-      if (age < 0) {
-        this.smokeOpacities[i] = 0;
-        this.smokeSizes[i] = 0;
-        continue;
-      }
-      const nextAge = age + dt;
-      if (nextAge >= this.smokeLifetimes[i]) {
-        this.smokeAges[i] = -1;
-        this.smokeOpacities[i] = 0;
-        this.smokeSizes[i] = 0;
-        continue;
-      }
-      this.smokeAges[i] = nextAge;
-      const fade = 1 - nextAge / this.smokeLifetimes[i];
-      const velocity = this.smokeVelocities[i];
-      this.smokePositions[i * 3] += velocity.x * dt;
-      this.smokePositions[i * 3 + 1] += velocity.y * dt;
-      this.smokePositions[i * 3 + 2] += velocity.z * dt;
-      velocity.y += 0.3 * dt;
-      velocity.x *= Math.exp(-0.22 * dt);
-      velocity.z *= Math.exp(-0.22 * dt);
-      this.smokeSizes[i] = 0.55 + nextAge * 1.3;
-      this.smokeOpacities[i] = this.smokeStrengths[i] * 0.78 * fade;
-    }
-
-    const geometry = this.tireSmoke.geometry;
-    (geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
-    (geometry.getAttribute('aSize') as THREE.BufferAttribute).needsUpdate = true;
-    (geometry.getAttribute('aOpacity') as THREE.BufferAttribute).needsUpdate = true;
-    this.tireSmoke.visible = this.settings.effects;
+    this.tireSmoke.update(dt);
   }
 
-  private emitTireSmoke(wheel: 0 | 1, intensity: number): void {
-    const index = this.smokeIndex;
-    this.smokeIndex = (this.smokeIndex + 1) % DriveEngine.smokeCapacity;
-    const position = this.skidCurrentPositions[wheel];
-    const side = wheel === 0 ? -1 : 1;
-    const forwardX = Math.sin(this.yaw);
-    const forwardZ = Math.cos(this.yaw);
-    const rightX = Math.cos(this.yaw);
-    const rightZ = -Math.sin(this.yaw);
-    this.smokePositions[index * 3] = position.x + (Math.random() - 0.5) * 0.16;
-    this.smokePositions[index * 3 + 1] = position.y + 0.12;
-    this.smokePositions[index * 3 + 2] = position.z + (Math.random() - 0.5) * 0.16;
-    this.smokeAges[index] = 0;
-    this.smokeLifetimes[index] = 1.8 + Math.random() * 0.55;
-    this.smokeStrengths[index] = intensity;
-    this.smokeVelocities[index].set(
-      this.velocity.x * 0.12 - forwardX * (0.18 + Math.random() * 0.35) + rightX * side * (0.12 + Math.random() * 0.2),
-      0.42 + Math.random() * 0.35,
-      this.velocity.z * 0.12 - forwardZ * (0.18 + Math.random() * 0.35) + rightZ * side * (0.12 + Math.random() * 0.2),
-    );
-  }
-
-  private emitRemoteTireSmoke(remote: RemoteVehicle): void {
-    const spec = VEHICLES.find((vehicle) => vehicle.id === remote.target.vehicleId) ?? VEHICLES[0];
-    const yaw = remote.root.rotation.y;
+  // One puff at a rear wheel contact patch, thrown back and out from the tyre.
+  private emitWheelSmoke(emitter: number, x: number, z: number, yaw: number, side: -1 | 1, carVx: number, carVz: number, intensity: number): void {
     const forwardX = Math.sin(yaw);
     const forwardZ = Math.cos(yaw);
     const rightX = Math.cos(yaw);
     const rightZ = -Math.sin(yaw);
-    const rear = -spec.length * 0.31;
-    const halfTrack = spec.width * 0.51;
-    for (const side of [-1, 1]) {
-      const index = this.smokeIndex;
-      this.smokeIndex = (this.smokeIndex + 1) % DriveEngine.smokeCapacity;
-      const velocity = this.smokeVelocities[index];
-      this.smokePositions[index * 3] = remote.root.position.x + forwardX * rear + rightX * side * halfTrack + (Math.random() - 0.5) * 0.16;
-      this.smokePositions[index * 3 + 1] = 0.14;
-      this.smokePositions[index * 3 + 2] = remote.root.position.z + forwardZ * rear + rightZ * side * halfTrack + (Math.random() - 0.5) * 0.16;
-      this.smokeAges[index] = 0;
-      this.smokeLifetimes[index] = 1.8 + Math.random() * 0.55;
-      this.smokeStrengths[index] = 1;
-      this.smokeSizes[index] = 0.3;
-      this.smokeOpacities[index] = 0.48;
-      velocity.set(
-        -forwardX * (0.18 + Math.random() * 0.35) + rightX * side * (0.12 + Math.random() * 0.2),
-        0.42 + Math.random() * 0.35,
-        -forwardZ * (0.18 + Math.random() * 0.35) + rightZ * side * (0.12 + Math.random() * 0.2),
-      );
+    const back = 0.4 + Math.random() * 0.9;
+    const out = side * (0.25 + Math.random() * 0.45);
+    const px = x + (Math.random() - 0.5) * 0.3;
+    const pz = z + (Math.random() - 0.5) * 0.3;
+    const ground = groundHeightAt(this.worldData, px, pz);
+    this.tireSmoke.emit(
+      emitter,
+      px, ground + 0.22, pz, ground,
+      carVx * 0.25 - forwardX * back + rightX * out,
+      0.25 + Math.random() * 0.35,
+      carVz * 0.25 - forwardZ * back + rightZ * out,
+      intensity,
+    );
+  }
+
+  private emitRemoteTireSmoke(remote: RemoteVehicle, vx: number, vz: number): void {
+    const yaw = remote.root.rotation.y;
+    const rear = -remote.spec.length * 0.31;
+    const halfTrack = remote.spec.width * 0.51;
+    for (const side of [-1, 1] as const) {
+      const x = remote.root.position.x + Math.sin(yaw) * rear + Math.cos(yaw) * side * halfTrack;
+      const z = remote.root.position.z + Math.cos(yaw) * rear - Math.sin(yaw) * side * halfTrack;
+      this.emitWheelSmoke(remote.smokeEmitter + (side < 0 ? 0 : 1), x, z, yaw, side, vx, vz, smokeDensity(remote.smokeBuild));
     }
-    (this.tireSmoke.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
-    (this.tireSmoke.geometry.getAttribute('aSize') as THREE.BufferAttribute).needsUpdate = true;
-    (this.tireSmoke.geometry.getAttribute('aOpacity') as THREE.BufferAttribute).needsUpdate = true;
   }
 
   private updateSkidWheelPositions(): void {
@@ -1043,6 +1437,62 @@ export class DriveEngine {
     this.skidMarks.count = 0;
   }
 
+  // Barriers of model-based maps: the frame's move is checked in short steps
+  // (walls are thin, a fast car would jump through), then the car slides
+  // along the wall axis by axis, losing speed.
+  private handleWallCollision(): void {
+    const walls = this.worldData.walls;
+    if (!walls) return;
+    const position = this.carRoot.position;
+    const previous = this.previousCarPosition;
+    // Turned into a wall while standing: let it rotate back out instead of pinning it.
+    if (this.footprintBlocked(walls, previous.x, previous.z)) return;
+    const targetX = position.x;
+    const targetZ = position.z;
+    const steps = Math.max(1, Math.ceil(Math.hypot(targetX - previous.x, targetZ - previous.z) / WALL_CHECK_STEP));
+    let freeX = previous.x;
+    let freeZ = previous.z;
+    let hit = false;
+    for (let i = 1; i <= steps; i += 1) {
+      const x = previous.x + (targetX - previous.x) * i / steps;
+      const z = previous.z + (targetZ - previous.z) * i / steps;
+      if (this.footprintBlocked(walls, x, z)) {
+        hit = true;
+        break;
+      }
+      freeX = x;
+      freeZ = z;
+    }
+    if (!hit) return;
+    if (!this.footprintBlocked(walls, targetX, freeZ)) {
+      position.x = targetX;
+      position.z = freeZ;
+      this.velocity.z *= -0.2;
+    } else if (!this.footprintBlocked(walls, freeX, targetZ)) {
+      position.x = freeX;
+      position.z = targetZ;
+      this.velocity.x *= -0.2;
+    } else {
+      position.x = freeX;
+      position.z = freeZ;
+      this.velocity.multiplyScalar(-0.2);
+    }
+    this.velocity.multiplyScalar(0.85);
+  }
+
+  private footprintBlocked(walls: WallGrid, x: number, z: number): boolean {
+    const halfLength = this.vehicle.length * 0.45;
+    const halfWidth = this.vehicle.width * 0.42;
+    const sin = Math.sin(this.yaw);
+    const cos = Math.cos(this.yaw);
+    for (const along of [-halfLength, 0, halfLength]) {
+      for (const across of [-halfWidth, halfWidth]) {
+        if (walls.blocked(x + sin * along + cos * across, z + cos * along - sin * across)) return true;
+      }
+    }
+    return false;
+  }
+
   private handleCollisions(): void {
     for (const collider of this.worldData.colliders) {
       const dx = this.carRoot.position.x - collider.x;
@@ -1062,6 +1512,7 @@ export class DriveEngine {
         this.velocity.multiplyScalar(0.72);
       }
     }
+    this.handleWallCollision();
     const { minX, maxX, minZ, maxZ } = this.worldData.bounds;
     if (this.carRoot.position.x < minX || this.carRoot.position.x > maxX) {
       this.carRoot.position.x = THREE.MathUtils.clamp(this.carRoot.position.x, minX, maxX);
@@ -1073,10 +1524,38 @@ export class DriveEngine {
     }
   }
 
-  private updateCamera(dt: number): void {
-    this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    this.cameraTarget.set(this.carRoot.position.x, this.carRoot.position.y + 1.05, this.carRoot.position.z);
-    const distance = (9.2 + Math.min(3.5, this.velocity.length() * 0.12)) * this.cameraZoom;
+  private renderScene(): void {
+    let strength = 0;
+    const speed = this.velocity.length();
+    if (this.drivingEnabled && this.settings.effects && this.settings.quality !== 'low' && speed > MOTION_BLUR_START) {
+      // Streak away from where the car is heading, as seen on screen.
+      this.blurProbe.copy(this.carRoot.position).addScaledVector(this.velocity, 200 / speed).project(this.camera);
+      if (this.blurProbe.z < 1) {
+        const t = THREE.MathUtils.smoothstep(speed, MOTION_BLUR_START, MOTION_BLUR_FULL);
+        strength = MOTION_BLUR_MAX * t;
+        this.blurFocus.set(
+          THREE.MathUtils.clamp(this.blurProbe.x * 0.5 + 0.5, 0, 1),
+          THREE.MathUtils.clamp(this.blurProbe.y * 0.5 + 0.5, 0, 1),
+        );
+      }
+    }
+    this.motionBlur.render(this.scene, this.camera, strength, this.blurFocus);
+    // Lit brake lamps spread their light (only while one is lit).
+    if (this.settings.effects && this.visual.lights.brake) this.lampBloom.render(this.scene, this.camera);
+  }
+
+  private updateCamera(dt: number, snap = false): void {
+    const sizeScale = this.vehicle.length / CAMERA_REFERENCE_LENGTH;
+    const targetHeight = CAMERA_TARGET_HEIGHT * this.vehicle.height / CAMERA_REFERENCE_HEIGHT;
+    const smoothing = snap ? 1 : 1 - Math.pow(1 - this.settings.cameraFollow, dt * 60);
+    // Only the heading and the height are smoothed. The distance to the car
+    // stays fixed, so speed never drags the camera back; past the pull-back
+    // speed it eases out by a hair.
+    this.cameraHeading += (THREE.MathUtils.euclideanModulo(this.yaw - this.cameraHeading + Math.PI, Math.PI * 2) - Math.PI) * smoothing;
+    this.cameraHeight += (this.carRoot.position.y + targetHeight - this.cameraHeight) * smoothing;
+    this.cameraTarget.set(this.carRoot.position.x, this.cameraHeight, this.carRoot.position.z);
+    const pullBack = THREE.MathUtils.smoothstep(this.velocity.length(), CAMERA_PULLBACK_START, CAMERA_PULLBACK_FULL);
+    const distance = CAMERA_DISTANCE * sizeScale * (1 + CAMERA_PULLBACK * pullBack) * this.cameraZoom;
     const orbitInput = Number(this.keys.has('arrowright')) - Number(this.keys.has('arrowleft'));
     const elevationInput = Number(this.keys.has('arrowup')) - Number(this.keys.has('arrowdown'));
     this.cameraOrbit = Math.atan2(
@@ -1084,15 +1563,13 @@ export class DriveEngine {
       Math.cos(this.cameraOrbit + orbitInput * dt * 1.55),
     );
     this.cameraElevation = THREE.MathUtils.clamp(this.cameraElevation + elevationInput * dt * 0.62, 0.12, 0.9);
-    const cameraYaw = this.yaw + this.cameraOrbit;
+    const cameraYaw = this.cameraHeading + this.cameraOrbit;
     const horizontalDistance = distance * Math.cos(this.cameraElevation);
-    this.cameraDesired.set(
+    this.camera.position.set(
       this.carRoot.position.x - Math.sin(cameraYaw) * horizontalDistance,
-      this.cameraTarget.y + distance * Math.sin(this.cameraElevation) + Math.min(1.2, this.velocity.length() * 0.04),
+      this.cameraTarget.y + distance * Math.sin(this.cameraElevation),
       this.carRoot.position.z - Math.cos(cameraYaw) * horizontalDistance,
     );
-    const smoothing = 1 - Math.pow(1 - this.settings.cameraFollow, dt * 60);
-    this.camera.position.lerp(this.cameraDesired, smoothing);
     this.camera.lookAt(this.cameraTarget);
   }
 
@@ -1106,8 +1583,8 @@ export class DriveEngine {
       this.gear = 1;
       return;
     }
-    const speedKmh = Math.abs(longitudinal) * ECONOMY.kmhPerUnit;
-    const rpm = this.rpmAtSpeed(speedKmh, this.gear);
+    // Shift on road speed, not wheel speed: a spinning tyre should not upshift.
+    const rpm = rpmAtSpeed(this.vehicle, longitudinal, this.gear);
     if (gas && rpm >= AUTO_UPSHIFT_RPM && this.gear < 6) {
       this.gear = (this.gear + 1) as Gear;
     } else if (this.gear > 1 && rpm <= AUTO_DOWNSHIFT_RPM) {
@@ -1115,17 +1592,12 @@ export class DriveEngine {
     }
   }
 
-  private rpmAtSpeed(speedKmh: number, gear: Gear): number {
-    const gearIndex = Math.max(1, gear);
-    const gearSpeedLimit = gear > 0 ? this.vehicle.maxSpeed * GEAR_SPEED[gearIndex] : 36;
-    return Math.round(850 + Math.min(1, speedKmh / Math.max(gearSpeedLimit, 1)) * 6200);
-  }
 
   private makeTelemetry(): Telemetry {
     const signed = this.velocity.dot(this.forward);
     const speed = Math.abs(signed) * ECONOMY.kmhPerUnit;
-    const rpm = this.rpmAtSpeed(speed, this.gear);
-    return { speedKmh: speed, gear: this.gear, rpm, drifting: this.driftValue > 0.2 };
+    const rpm = Math.round(this.drivetrain.rpm);
+    return { speedKmh: speed, gear: this.gear, rpm, drifting: this.driftValue > 0.2, tcsActive: this.tcsActive };
   }
 
   dispose(): void {
@@ -1142,13 +1614,25 @@ export class DriveEngine {
     window.removeEventListener('pointercancel', this.onCameraPointerEnd, true);
     this.renderer.domElement.removeEventListener('wheel', this.onCameraWheel);
     this.host.removeChild(this.renderer.domElement);
+    this.motionBlur.dispose();
+    this.lampBloom.dispose();
     this.renderer.dispose();
     this.vehicleAudio.dispose();
     for (const remote of this.remoteVehicles.values()) disposeVehicleVisual(remote.visual);
     this.remoteVehicles.clear();
     disposeVehicleVisual(this.visual);
+    this.tireSmoke.dispose();
     disposeObject(this.scene);
   }
+}
+
+function advanceSmokeBuild(build: number, sliding: boolean, dt: number): number {
+  return sliding ? Math.min(1, build + dt / SMOKE_BUILD_TIME) : Math.max(0, build - dt / SMOKE_DECAY_TIME);
+}
+
+// Ease-in so the first moments of a slide only leave light wisps.
+function smokeDensity(build: number): number {
+  return 0.12 + 0.88 * build * build;
 }
 
 function approach(value: number, target: number, delta: number): number {

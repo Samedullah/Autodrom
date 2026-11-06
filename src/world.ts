@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { MapId } from './data';
 import type { GameSettings } from './save';
+import { createSpaWorld } from './spa';
+import type { HeightGrid, WallGrid } from './terrain';
 
 export interface WorldCollider {
   x: number;
@@ -15,8 +17,20 @@ export interface WorldData {
   spawn: THREE.Vector3;
   spawnYaw: number;
   speedGates: SpeedGate[];
+  ramps: Ramp[];
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+  /** Ground height field of maps with real elevation; null means flat ground at 0. */
+  terrain: HeightGrid | null;
+  /** Barriers and walls of maps built from a model; null when there are none. */
+  walls: WallGrid | null;
+  /** Resolves once content loaded in the background (a map model) is in place. */
+  ready: Promise<void>;
+  /** 0..1 share of that background loading done. */
+  loadProgress: () => number;
 }
+
+/** One district of the connected world, before it is merged into a map. */
+type WorldPart = Omit<WorldData, 'terrain' | 'walls' | 'ready' | 'loadProgress'>;
 
 export interface SpeedGate {
   id: string;
@@ -25,7 +39,59 @@ export interface SpeedGate {
   halfWidth: number;
 }
 
+/** A wedge driven up along `direction`; it drops off vertically at the high end. */
+export interface Ramp {
+  center: THREE.Vector3;
+  direction: THREE.Vector3;
+  length: number;
+  halfWidth: number;
+  height: number;
+}
+
+/**
+ * Height of the drivable surface at (x, z): the map's terrain (flat 0 without
+ * one), or a ramp standing higher. When `slope` is given it receives that
+ * surface's rise per metre along world X and Z.
+ */
+export function groundHeightAt(world: Pick<WorldData, 'ramps' | 'terrain'>, x: number, z: number, slope?: THREE.Vector2): number {
+  const terrain = world.terrain?.sample(x, z, slope);
+  let height = terrain ?? 0;
+  if (terrain === undefined || terrain === null) slope?.set(0, 0);
+  for (const ramp of world.ramps) {
+    const dx = x - ramp.center.x;
+    const dz = z - ramp.center.z;
+    const along = dx * ramp.direction.x + dz * ramp.direction.z + ramp.length / 2;
+    const across = dx * ramp.direction.z - dz * ramp.direction.x;
+    if (along < 0 || along > ramp.length || Math.abs(across) > ramp.halfWidth) continue;
+    const rampHeight = ramp.height * along / ramp.length;
+    if (rampHeight <= height) continue;
+    height = rampHeight;
+    slope?.set(ramp.direction.x, ramp.direction.z).multiplyScalar(ramp.height / ramp.length);
+  }
+  return height;
+}
+
+function addRamp(parent: THREE.Group, ramp: Ramp): void {
+  const profile = new THREE.Shape([
+    new THREE.Vector2(0, 0),
+    new THREE.Vector2(ramp.length, 0),
+    new THREE.Vector2(ramp.length, ramp.height),
+  ]);
+  const geometry = new THREE.ExtrudeGeometry(profile, { depth: ramp.halfWidth * 2, bevelEnabled: false });
+  geometry.translate(-ramp.length / 2, 0, -ramp.halfWidth);
+  const mesh = new THREE.Mesh(geometry, standard('#c9a24b', 0.82, 0.05));
+  // The profile runs along local +X; turn it to face the ramp direction.
+  mesh.rotation.y = Math.atan2(-ramp.direction.z, ramp.direction.x);
+  mesh.position.set(ramp.center.x, 0.02, ramp.center.z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  parent.add(mesh);
+}
+
 const cityRoadCenters = [-135, -45, 45, 135];
+
+// Meshes thinner than this (metres, world space) never cast shadows.
+const FLAT_SURFACE_MAX_HEIGHT = 0.3;
 
 function standard(color: string, roughness = 0.8, metalness = 0.04): THREE.MeshStandardMaterial {
   return new THREE.MeshStandardMaterial({ color, roughness, metalness });
@@ -129,6 +195,8 @@ function addCityBuildings(parent: THREE.Group, colliders: WorldCollider[]): void
   }
   windows.count = index;
   windows.instanceMatrix.needsUpdate = true;
+  // Panes sit flush on the facade, which already casts the building shadow.
+  windows.userData.castsShadow = false;
   parent.add(windows);
 }
 
@@ -164,7 +232,7 @@ function addStreetFurniture(parent: THREE.Group): void {
   parent.add(polesMesh, lampHeads);
 }
 
-function createCityWorld(): WorldData {
+function createCityWorld(): WorldPart {
   const root = new THREE.Group();
   const roadMaterial = standard('#303837', 0.94, 0.01);
   const sidewalkMaterial = standard('#a7a89a', 0.91, 0.02);
@@ -214,13 +282,16 @@ function createCityWorld(): WorldData {
   addStreetFurniture(root);
   addCityTrees(root, colliders);
   addDistrictProps(root);
+  // Test ramp straight ahead of the spawn, past the first crossing for a run-up.
+  const ramps: Ramp[] = [{ center: new THREE.Vector3(-45, 0, 97), direction: new THREE.Vector3(0, 0, 1), length: 14, halfWidth: 4, height: 2 }];
+  for (const ramp of ramps) addRamp(root, ramp);
   return {
-    root, colliders, spawn: new THREE.Vector3(-45, 0, 10), spawnYaw: 0, speedGates: [],
+    root, colliders, spawn: new THREE.Vector3(-45, 0, 10), spawnYaw: 0, speedGates: [], ramps,
     bounds: { minX: -195, maxX: 195, minZ: -195, maxZ: 195 },
   };
 }
 
-function createHighwayWorld(): WorldData {
+function createHighwayWorld(): WorldPart {
   const root = new THREE.Group();
   const roadPoints: THREE.Vector3[] = [];
   const radius = 76;
@@ -281,7 +352,7 @@ function createHighwayWorld(): WorldData {
   addHighwayScenery(root, curve);
   const speedGates = addSpeedGates(root, curve);
   return {
-    root, colliders: [], spawn: new THREE.Vector3(-140, 0, radius + 8), spawnYaw: Math.PI / 2, speedGates,
+    root, colliders: [], spawn: new THREE.Vector3(-140, 0, radius + 8), spawnYaw: Math.PI / 2, speedGates, ramps: [],
     bounds: { minX: -380, maxX: 380, minZ: -260, maxZ: 260 },
   };
 }
@@ -514,7 +585,21 @@ function seededRandom(seed: number): () => number {
   };
 }
 
+// The map never moves: compute its matrices once and let the renderer skip
+// the whole subtree in its per-frame matrix update.
+export function freezeStatic(root: THREE.Object3D): void {
+  root.updateMatrixWorld(true);
+  root.traverse((object) => { object.matrixAutoUpdate = false; });
+  root.matrixWorldAutoUpdate = false;
+}
+
 export function buildWorld(mapId: MapId, settings: GameSettings): WorldData {
+  const world = mapId === 'spa' ? createSpaWorld(settings) : buildCityHighwayWorld(settings);
+  freezeStatic(world.root);
+  return world;
+}
+
+function buildCityHighwayWorld(settings: GameSettings): WorldData {
   const worldScale = 1.2;
   const city = createCityWorld();
   const highway = createHighwayWorld();
@@ -542,20 +627,37 @@ export function buildWorld(mapId: MapId, settings: GameSettings): WorldData {
       center: gate.center.clone().add(highway.root.position).multiplyScalar(worldScale),
       halfWidth: gate.halfWidth * worldScale,
     })),
+    ramps: city.ramps.map((ramp) => ({
+      ...ramp,
+      center: ramp.center.clone().multiplyScalar(worldScale),
+      length: ramp.length * worldScale,
+      halfWidth: ramp.halfWidth * worldScale,
+      height: ramp.height * worldScale,
+    })),
     bounds: {
       minX: -215 * worldScale,
       maxX: 905 * worldScale,
       minZ: -270 * worldScale,
       maxZ: 270 * worldScale,
     },
+    terrain: null,
+    walls: null,
+    ready: Promise.resolve(),
+    loadProgress: () => 1,
   };
   root.scale.setScalar(worldScale);
+  root.updateMatrixWorld(true);
+  const bounds = new THREE.Box3();
+  const size = new THREE.Vector3();
   world.root.traverse((object) => {
     if ((object as THREE.Mesh).isMesh) {
       const mesh = object as THREE.Mesh;
-      mesh.castShadow = settings.shadows && settings.quality !== 'low';
+      // Roads, markings and other ground-level surfaces only receive shadows.
+      if (mesh.userData.castsShadow === undefined) {
+        mesh.userData.castsShadow = bounds.setFromObject(mesh).getSize(size).y >= FLAT_SURFACE_MAX_HEIGHT;
+      }
+      mesh.castShadow = settings.shadows && settings.quality !== 'low' && mesh.userData.castsShadow;
     }
   });
-  void mapId;
   return world;
 }

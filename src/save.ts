@@ -56,8 +56,8 @@ export function loadSave(): SaveData {
   const savedActive = typeof raw.activeVehicleId === 'string' ? normalizeVehicleId(raw.activeVehicleId) : null;
   const active = savedActive && vehicleIds.has(savedActive) ? savedActive : null;
   const cash = typeof raw.cash === 'number' && Number.isFinite(raw.cash) ? Math.max(0, Math.floor(raw.cash)) : ECONOMY.startingCash;
-  // Older saves selected either environment; both now lead to the connected world.
-  const map: MapId = 'city-highway';
+  // Older saves named the city or highway on their own; both are now the connected world.
+  const map: MapId = typeof raw.map === 'string' && isValidMap(raw.map) ? raw.map : 'city-highway';
   const starterChosen = raw.starterChosen === true && !!active && owned.includes(active);
   if (!starterChosen && active && owned.length > 0 && raw.starterChosen === true) {
     owned.splice(owned.indexOf(active), 1);

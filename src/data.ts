@@ -1,6 +1,6 @@
 export type CarClass = 'EKONOMI' | 'SEHIR' | 'SPORT' | 'PERFORMANS' | 'SUPER';
 export type BodyStyle = 'hatch' | 'sedan' | 'coupe' | 'roadster' | 'sport' | 'super';
-export type MapId = 'city-highway';
+export type MapId = 'city-highway' | 'spa';
 
 export interface RealVehicleSpecs {
   modelYear?: number;
@@ -52,7 +52,11 @@ export const ECONOMY = {
   maxCreditedElapsedSeconds: 3,
 } as const;
 
-export const VEHICLES: VehicleSpec[] = [
+// In-game cars are drawn and simulated this much larger than the catalog
+// dimensions, so they read better against the map.
+export const VEHICLE_SCALE = 1.2;
+
+const CATALOG: VehicleSpec[] = [
   {
     id: 'cedar-mini', name: 'Cedar Mini', shortName: 'CEDAR', subtitle: 'Şehir için hafif ve tutumlu',
     brand: 'Autodrom',
@@ -524,10 +528,17 @@ export const VEHICLES: VehicleSpec[] = [
   },
 ];
 
+export const VEHICLES: VehicleSpec[] = CATALOG.map((vehicle) => ({
+  ...vehicle,
+  length: vehicle.length * VEHICLE_SCALE,
+  width: vehicle.width * VEHICLE_SCALE,
+  height: vehicle.height * VEHICLE_SCALE,
+}));
+
 export const STARTER_VEHICLES = VEHICLES.filter((vehicle) => vehicle.starterChoice);
 
 export const CLASS_LABELS: Record<CarClass, string> = {
   EKONOMI: 'EKONOMİ', SEHIR: 'ŞEHİR', SPORT: 'SPORT', PERFORMANS: 'PERFORMANS', SUPER: 'SÜPER',
 };
 
-export const MAP_LABELS: Record<MapId, string> = { 'city-highway': 'Şehir + Otoban' };
+export const MAP_LABELS: Record<MapId, string> = { 'city-highway': 'Şehir + Otoban', spa: 'Spa-Francorchamps' };

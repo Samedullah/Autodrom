@@ -84,8 +84,12 @@ function playerFor(socket, payload = {}) {
     drifting: false,
     burnout: false,
     rearWheelSpinRate: 0,
+    mapId: 'city-highway',
   };
 }
+
+// Keep in sync with MapId in src/data.ts.
+const MAP_IDS = new Set(['city-highway', 'spa']);
 
 function removeFromRoom(socket) {
   const code = socket.data.roomCode;
@@ -161,6 +165,8 @@ io.on('connection', (socket) => {
     player.burnout = payload.burnout === true;
     player.rearWheelSpinRate = finite(payload.rearWheelSpinRate, 36) ? payload.rearWheelSpinRate : 0;
     player.vehicleId = cleanVehicle(payload.vehicleId);
+    // Clients only draw players on their own map.
+    player.mapId = MAP_IDS.has(payload.mapId) ? payload.mapId : 'city-highway';
     socket.to(code).volatile.emit('room:player-state', player);
   });
   socket.on('room:leave', () => removeFromRoom(socket));

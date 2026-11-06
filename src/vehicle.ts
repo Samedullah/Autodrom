@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinnedModel } from 'three/addons/utils/SkeletonUtils.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { VehicleSpec } from './data';
+import { GLOW_LAYER } from './lampBloom';
 
 export interface VehicleVisual {
   root: THREE.Group;
@@ -30,6 +32,223 @@ export interface VehicleVisual {
   modelInstance: THREE.Object3D | null;
   releaseModel: (() => void) | null;
   disposed: boolean;
+  /** One entry per wheel: where it sits on the car and what moves with it. */
+  suspension: WheelSuspension[];
+  lights: VehicleLights;
+}
+
+interface LampMaterial {
+  material: THREE.MeshStandardMaterial;
+  color: THREE.Color;
+  emissive: THREE.Color;
+  intensity: number;
+  opacity: number;
+}
+
+/** Brake and reverse lamps of the car currently shown (model or procedural). */
+export interface VehicleLights {
+  /** Red rear lamp materials that glow brighter under braking. */
+  brakeLamps: LampMaterial[];
+  /** Separate "lamp on" meshes some models ship: shown only while braking / reversing. */
+  brakeNodes: THREE.Object3D[];
+  reverseNodes: THREE.Object3D[];
+  /** Soft red halo around each lit lamp and on the road behind; shown while braking. */
+  /** Copies of the lit lamp meshes on the bloom layer: the glow spreads from the lamp itself. */
+  glow: LampGlow | null;
+  brake: boolean;
+  reverse: boolean;
+}
+
+// Deep red with no green in it, kept modest: tone mapping pushes a strong
+// red with any green towards orange. The lens itself turns red too, so a
+// whitish lens does not shine back the daylight in white. Lenses with a
+// texture glow through it, so the lamp's own pattern shows.
+const BRAKE_GLOW = new THREE.Color(0.9, 0, 0);
+const BRAKE_GLOW_INTENSITY = 1.4;
+const BRAKE_GLOW_INTENSITY_TEXTURED = 2;
+const LIT_LENS_TINT = new THREE.Color(1, 0.15, 0.12);
+// Colour of the light the lamp spreads (bloom layer), linear and above 1 so the blur keeps it bright.
+const LAMP_BLOOM_COLOR = new THREE.Color(2.6, 0.02, 0);
+// A lit lens fills with light but its housing still shows through.
+const BRAKE_LENS_EXTRA_OPACITY = 0.35;
+const BRAKE_LENS_MAX_OPACITY = 0.85;
+
+function lampMaterial(material: THREE.MeshStandardMaterial): LampMaterial {
+  return { material, color: material.color.clone(), emissive: material.emissive.clone(), intensity: material.emissiveIntensity, opacity: material.opacity };
+}
+
+function emptyLights(): VehicleLights {
+  return { brakeLamps: [], brakeNodes: [], reverseNodes: [], glow: null, brake: false, reverse: false };
+}
+
+interface LampGlow { meshes: THREE.Mesh[]; material: THREE.Material }
+
+/** A bloom-layer copy of each lamp mesh, parented to it so it follows the car. */
+function createLampGlow(lamps: THREE.Mesh[]): LampGlow | null {
+  if (lamps.length === 0) return null;
+  const material = new THREE.MeshBasicMaterial({ color: LAMP_BLOOM_COLOR, toneMapped: false, side: THREE.DoubleSide });
+  const meshes: THREE.Mesh[] = [];
+  for (const lamp of lamps) {
+    const skinned = lamp as THREE.SkinnedMesh;
+    let glow: THREE.Mesh;
+    if (skinned.isSkinnedMesh) {
+      const copy = new THREE.SkinnedMesh(lamp.geometry, material);
+      copy.bind(skinned.skeleton, skinned.bindMatrix);
+      glow = copy;
+    } else {
+      glow = new THREE.Mesh(lamp.geometry, material);
+    }
+    glow.layers.set(GLOW_LAYER);
+    glow.visible = false;
+    glow.castShadow = false;
+    glow.userData.castsShadow = false;
+    glow.frustumCulled = lamp.frustumCulled;
+    lamp.add(glow);
+    meshes.push(glow);
+  }
+  return { meshes, material };
+}
+
+function disposeBrakeGlow(lights: VehicleLights): void {
+  const glow = lights.glow;
+  if (!glow) return;
+  for (const mesh of glow.meshes) mesh.parent?.remove(mesh);
+  glow.material.dispose();
+  lights.glow = null;
+}
+
+export function setVehicleLights(visual: VehicleVisual, brake: boolean, reverse: boolean): void {
+  const lights = visual.lights;
+  if (lights.brake !== brake) {
+    lights.brake = brake;
+    for (const lamp of lights.brakeLamps) {
+      const material = lamp.material;
+      if (brake) {
+        material.color.copy(lamp.color).multiply(LIT_LENS_TINT);
+        material.emissive.copy(BRAKE_GLOW);
+        material.emissiveIntensity = material.emissiveMap ? BRAKE_GLOW_INTENSITY_TEXTURED : BRAKE_GLOW_INTENSITY;
+        if (material.transparent) {
+          material.opacity = Math.max(lamp.opacity, Math.min(BRAKE_LENS_MAX_OPACITY, lamp.opacity + BRAKE_LENS_EXTRA_OPACITY));
+        }
+      } else {
+        material.color.copy(lamp.color);
+        material.emissive.copy(lamp.emissive);
+        material.emissiveIntensity = lamp.intensity;
+        material.opacity = lamp.opacity;
+      }
+    }
+    for (const node of lights.brakeNodes) node.visible = brake;
+    if (lights.glow) for (const mesh of lights.glow.meshes) mesh.visible = brake;
+  }
+  if (lights.reverse !== reverse) {
+    lights.reverse = reverse;
+    for (const node of lights.reverseNodes) node.visible = reverse;
+  }
+}
+
+// Models ripped from games often carry the lit lamp as its own mesh.
+const BRAKE_ON_NODE_PATTERN = /(^|[^a-z])lights?_brakes?|brake_?light_?(glass_?)?lit/i;
+const REVERSE_ON_NODE_PATTERN = /(^|[^a-z])lights?_reverse/i;
+// Otherwise the rear lamp lens is found by its name...
+const REAR_LAMP_NAME_PATTERN = /tail_?(light|lamp|lens)|brake_?(light|lamp)|stop_?(light|lamp)|rear_?(light|lamp)|red_?glass|glass_?red|(outer|inner)_?red|lglass\w*red|light\w*red/i;
+const NOT_LAMP_PATTERN = /calip|callip|disc|rotor|pad|wheel|tire|tyre|(^|[^a-z])rims?([^a-z]|$)|seat|interior|badge|head/i;
+
+function nodeLabel(object: THREE.Object3D): string {
+  return object.name || String(object.userData.name ?? '');
+}
+
+/**
+ * Finds the brake and reverse lamps of an installed model. Dedicated "lamp
+ * on" meshes are toggled; else red rear lamp lenses (by name, or failing
+ * that by being small, red and at the back) get their own material copy that
+ * can glow without lighting other cars sharing the model.
+ */
+function findModelLights(instance: THREE.Object3D, root: THREE.Object3D, spec: VehicleSpec, owned: THREE.Material[]): VehicleLights {
+  const lights = emptyLights();
+  const collectToggles = (pattern: RegExp, into: THREE.Object3D[]): void => {
+    instance.traverse((object) => {
+      if (!pattern.test(nodeLabel(object))) return;
+      for (let parent = object.parent; parent && parent !== instance; parent = parent.parent) {
+        if (into.includes(parent)) return;
+      }
+      into.push(object);
+    });
+  };
+  collectToggles(BRAKE_ON_NODE_PATTERN, lights.brakeNodes);
+  collectToggles(REVERSE_ON_NODE_PATTERN, lights.reverseNodes);
+  if (lights.brakeNodes.length > 0) {
+    const lamps: THREE.Mesh[] = [];
+    for (const node of lights.brakeNodes) node.traverse((child) => { if ((child as THREE.Mesh).isMesh) lamps.push(child as THREE.Mesh); });
+    lights.glow = createLampGlow(lamps);
+    for (const node of [...lights.brakeNodes, ...lights.reverseNodes]) node.visible = false;
+    return lights;
+  }
+  for (const node of lights.reverseNodes) node.visible = false;
+
+  const toggled = new Set<THREE.Object3D>();
+  for (const node of lights.reverseNodes) node.traverse((child) => toggled.add(child));
+  const meshes: THREE.Mesh[] = [];
+  instance.traverse((object) => {
+    if ((object as THREE.Mesh).isMesh && !toggled.has(object)) meshes.push(object as THREE.Mesh);
+  });
+  const named: THREE.Mesh[] = [];
+  for (const mesh of meshes) {
+    let label = nodeLabel(mesh);
+    for (let parent = mesh.parent; parent && parent !== instance; parent = parent.parent) label += ' ' + nodeLabel(parent);
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    label += ' ' + materials.map((material) => material.name).join(' ');
+    if (REAR_LAMP_NAME_PATTERN.test(label) && !NOT_LAMP_PATTERN.test(label)) named.push(mesh);
+  }
+  let candidates = named;
+  if (candidates.length === 0) {
+    root.updateWorldMatrix(true, true);
+    const toRoot = root.matrixWorld.clone().invert();
+    const box = new THREE.Box3();
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    candidates = meshes.filter((mesh) => {
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const red = materials.some((material) => {
+        const color = (material as THREE.MeshStandardMaterial).color;
+        return color && color.r > 0.25 && color.r > color.g * 2.5 && color.r > color.b * 2.5;
+      });
+      if (!red) return false;
+      box.setFromObject(mesh).applyMatrix4(toRoot);
+      box.getSize(size);
+      box.getCenter(center);
+      return center.z < -spec.length * 0.36 && Math.max(size.x, size.y, size.z) < spec.width * 0.45
+        && center.y > spec.height * 0.25 && center.y < spec.height * 0.85;
+    });
+  }
+  lights.glow = createLampGlow(candidates);
+  const copies = new Map<THREE.Material, THREE.Material>();
+  for (const mesh of candidates) {
+    const swap = (material: THREE.Material): THREE.Material => {
+      if (!(material as THREE.MeshStandardMaterial).isMeshStandardMaterial) return material;
+      let copy = copies.get(material);
+      if (!copy) {
+        copy = material.clone();
+        // Glow through the lens texture. Assigned now, with the lamp still
+        // dark, so braking only changes values and never recompiles a shader.
+        const lens = copy as THREE.MeshStandardMaterial;
+        if (!lens.emissiveMap && lens.map) lens.emissiveMap = lens.map;
+        copies.set(material, copy);
+        owned.push(copy);
+        lights.brakeLamps.push(lampMaterial(copy as THREE.MeshStandardMaterial));
+      }
+      return copy;
+    };
+    mesh.material = Array.isArray(mesh.material) ? mesh.material.map(swap) : swap(mesh.material);
+  }
+  return lights;
+}
+
+export interface WheelSuspension {
+  /** Wheel centre in the vehicle's own frame (metres, +Z forward, +X right). */
+  x: number;
+  z: number;
+  /** Nodes that travel up and down with this wheel (wheel or steering pivot, calipers). */
+  nodes: Array<{ node: THREE.Object3D; rest: THREE.Vector3; up: THREE.Vector3 }>;
 }
 
 const modelLoader = new GLTFLoader();
@@ -37,9 +256,113 @@ interface CachedModel {
   promise: Promise<THREE.Object3D | null>;
   references: number;
   pendingUsers: number;
+  progress: number; // 0..1 share of the file downloaded
 }
 
 const modelCache = new Map<string, CachedModel>();
+
+// Node names that installGeneratedModel animates (wheel spin, steering, calipers).
+// GLTFLoader turns spaces in some node names into underscores.
+const WHEEL_NODE_PATTERN = /^(?:3dwheel[\s_]+(?:front|rear)[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL|BR|BL)_rotation(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:rear|front|frount)[-_]+[lr](?:[_\b]|\b))/i;
+const STEERING_PIVOT_PATTERN = /^bone_wheel_(?:FR|FL)_steer(?:\.\d+|\d+)?(?:\b|_)/i;
+const FRONT_CALIPER_PATTERN = /^bone_caliper_(?:FR|FL).{3}$/i;
+const REAR_CALIPER_PATTERN = /^bone_caliper_(?:BR|BL).{3}$/i;
+// Parts smaller than this share of the car length do not cast shadows; the body
+// shadow already covers them and each caster costs a draw call in the shadow pass.
+const SHADOW_CASTER_MIN_LENGTH_SHARE = 0.2;
+
+function objectName(object: THREE.Object3D): string {
+  return object.name || String(object.userData.name ?? '');
+}
+
+function isAnimatedNode(object: THREE.Object3D): boolean {
+  const name = objectName(object);
+  return WHEEL_NODE_PATTERN.test(name) || STEERING_PIVOT_PATTERN.test(name)
+    || FRONT_CALIPER_PATTERN.test(name) || REAR_CALIPER_PATTERN.test(name);
+}
+
+function toFloatAttribute(attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute): THREE.BufferAttribute {
+  const { count, itemSize } = attribute;
+  const array = new Float32Array(count * itemSize);
+  for (let i = 0; i < count; i += 1) {
+    for (let c = 0; c < itemSize; c += 1) array[i * itemSize + c] = attribute.getComponent(i, c);
+  }
+  return new THREE.BufferAttribute(array, itemSize);
+}
+
+/**
+ * Imported cars often arrive as hundreds of primitives, each a separate draw
+ * call (twice with shadows). Bake every mesh that never moves relative to the
+ * model into one mesh per material. Animated subtrees stay untouched so wheel
+ * and steering pivots keep working.
+ */
+function mergeStaticMeshes(model: THREE.Object3D): void {
+  model.updateMatrixWorld(true);
+  const modelInverse = model.matrixWorld.clone().invert();
+  const groups = new Map<string, { material: THREE.Material; geometries: THREE.BufferGeometry[]; sources: THREE.Mesh[] }>();
+  const visit = (object: THREE.Object3D): void => {
+    if (isAnimatedNode(object)) return;
+    const mesh = object as THREE.Mesh;
+    const mergeable = mesh.isMesh && !(mesh as THREE.SkinnedMesh).isSkinnedMesh && !(mesh as THREE.InstancedMesh).isInstancedMesh
+      && !Array.isArray(mesh.material) && Object.keys(mesh.geometry.morphAttributes).length === 0;
+    if (mergeable) {
+      const material = mesh.material as THREE.Material;
+      const source = mesh.geometry;
+      const geometry = new THREE.BufferGeometry();
+      for (const [name, attribute] of Object.entries(source.attributes)) geometry.setAttribute(name, toFloatAttribute(attribute));
+      if (source.index) geometry.setIndex(Array.from(source.index.array));
+      const transform = modelInverse.clone().multiply(mesh.matrixWorld);
+      geometry.applyMatrix4(transform);
+      if (transform.determinant() < 0) {
+        // A mirrored transform reverses triangle winding once baked into vertices.
+        if (!geometry.index) geometry.setIndex(Array.from({ length: geometry.attributes.position.count }, (_, i) => i));
+        const index = geometry.index!;
+        for (let i = 0; i + 2 < index.count; i += 3) {
+          const b = index.getX(i + 1);
+          index.setX(i + 1, index.getX(i + 2));
+          index.setX(i + 2, b);
+        }
+      }
+      const signature = Object.keys(geometry.attributes).sort().map((name) => name + geometry.attributes[name].itemSize).join(',');
+      const key = material.uuid + '|' + signature + '|' + (geometry.index ? 'i' : 'n');
+      const group = groups.get(key) ?? { material, geometries: [], sources: [] };
+      group.geometries.push(geometry);
+      group.sources.push(mesh);
+      groups.set(key, group);
+    }
+    for (const child of object.children) visit(child);
+  };
+  visit(model);
+
+  const replacedGeometries = new Set<THREE.BufferGeometry>();
+  for (const group of groups.values()) {
+    if (group.sources.length < 2) {
+      for (const geometry of group.geometries) geometry.dispose();
+      continue;
+    }
+    const merged = mergeGeometries(group.geometries);
+    for (const geometry of group.geometries) geometry.dispose();
+    if (!merged) continue;
+    const mesh = new THREE.Mesh(merged, group.material);
+    mesh.name = 'merged-static';
+    model.add(mesh);
+    for (const source of group.sources) {
+      source.removeFromParent();
+      replacedGeometries.add(source.geometry);
+    }
+  }
+  for (const geometry of replacedGeometries) geometry.dispose();
+
+  // Drop now-empty transform nodes so per-frame matrix updates stay cheap.
+  const prune = (object: THREE.Object3D): boolean => {
+    for (const child of [...object.children]) {
+      if (prune(child)) child.removeFromParent();
+    }
+    return object !== model && object.children.length === 0 && !(object as THREE.Mesh).isMesh
+      && !isAnimatedNode(object) && !(object as THREE.Bone).isBone;
+  };
+  prune(model);
+}
 let manifestPromise: Promise<Set<string>> | null = null;
 
 async function availableModels(): Promise<Set<string>> {
@@ -258,6 +581,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
     procedural.add(mirror);
   }
 
+  const suspension: WheelSuspension[] = [];
   for (const z of [axleFront, axleRear]) {
     for (const side of [-1, 1]) {
       const steeringPivot = new THREE.Group();
@@ -267,6 +591,10 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
       procedural.add(steeringPivot);
       wheels.push(wheel);
       if (z === axleFront) steerWheels.push(steeringPivot);
+      suspension.push({
+        x: side * wheelX, z,
+        nodes: [{ node: steeringPivot, rest: steeringPivot.position.clone(), up: new THREE.Vector3(0, 1, 0) }],
+      });
     }
   }
 
@@ -298,7 +626,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
       object.receiveShadow = true;
     }
   });
-  return {
+  const visual: VehicleVisual = {
     root,
     wheels,
     steerWheels,
@@ -309,17 +637,26 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
     modelLoaded: false,
     modelWheels: [],
     modelSteeringNodes: [],
+    lights: { ...emptyLights(), brakeLamps: [lampMaterial(taillight)] },
     modelInstance: null,
     releaseModel: null,
     disposed: false,
+    suspension,
   };
+  const tails: THREE.Mesh[] = [];
+  procedural.traverse((object) => { if ((object as THREE.Mesh).material === taillight) tails.push(object as THREE.Mesh); });
+  visual.lights.glow = createLampGlow(tails);
+  return visual;
 }
 
 function getCachedModel(path: string, targetLength: number, rotationY = 0, excludeNodes: string[] = []): CachedModel {
   const cached = modelCache.get(path);
   if (cached) return cached;
-  const entry: CachedModel = { promise: Promise.resolve(null), references: 0, pendingUsers: 0 };
-  entry.promise = modelLoader.loadAsync(path).then((gltf) => {
+  const entry: CachedModel = { promise: Promise.resolve(null), references: 0, pendingUsers: 0, progress: 0 };
+  entry.promise = modelLoader.loadAsync(path, (event) => {
+    if (event.lengthComputable && event.total > 0) entry.progress = event.loaded / event.total;
+  }).then((gltf) => {
+    entry.progress = 1;
     const model = gltf.scene;
     if (excludeNodes.length > 0) {
       const excluded = new Set(excludeNodes);
@@ -341,9 +678,15 @@ function getCachedModel(path: string, targetLength: number, rotationY = 0, exclu
     model.position.x -= center.x;
     model.position.z -= center.z;
     model.position.y -= bounds.min.y;
+    mergeStaticMeshes(model);
+    model.updateMatrixWorld(true);
+    const partBounds = new THREE.Box3();
+    const partSize = new THREE.Vector3();
     model.traverse((object) => {
       if ((object as THREE.Mesh).isMesh) {
-        object.castShadow = true;
+        partBounds.setFromObject(object).getSize(partSize);
+        object.userData.castsShadow = Math.max(partSize.x, partSize.y, partSize.z) >= targetLength * SHADOW_CASTER_MIN_LENGTH_SHARE;
+        object.castShadow = object.userData.castsShadow;
         object.receiveShadow = true;
       }
     });
@@ -354,6 +697,11 @@ function getCachedModel(path: string, targetLength: number, rotationY = 0, exclu
   });
   modelCache.set(path, entry);
   return entry;
+}
+
+// How much of a car's model file has downloaded (0 when it has not started).
+export function modelDownloadProgress(spec: VehicleSpec): number {
+  return modelCache.get(spec.modelPath)?.progress ?? 0;
 }
 
 export async function installGeneratedModel(visual: VehicleVisual, spec: VehicleSpec): Promise<boolean> {
@@ -370,13 +718,15 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
     const wheelNodes: THREE.Object3D[] = [];
     const steeringPivotNodes: THREE.Object3D[] = [];
     const caliperNodes: THREE.Object3D[] = [];
+    const rearCaliperNodes: THREE.Object3D[] = [];
     instance.traverse((object) => {
       const nodeName = object.name || String(object.userData.name ?? '');
       // GLTFLoader turns spaces in some node names into underscores.
-      const isNamedWheel = /^(?:3dwheel[\s_]+(?:front|rear)[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL|BR|BL)_rotation(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:rear|front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
-      const isFrontSteeringPivot = /^bone_wheel_(?:FR|FL)_steer(?:\.\d+|\d+)?(?:\b|_)/i.test(nodeName);
-      const isFrontCaliper = /^bone_caliper_(?:FR|FL).{3}$/i.test(nodeName);
-      if (!isNamedWheel && !isFrontSteeringPivot && !isFrontCaliper) return;
+      const isNamedWheel = WHEEL_NODE_PATTERN.test(nodeName);
+      const isFrontSteeringPivot = STEERING_PIVOT_PATTERN.test(nodeName);
+      const isFrontCaliper = FRONT_CALIPER_PATTERN.test(nodeName);
+      const isRearCaliper = REAR_CALIPER_PATTERN.test(nodeName);
+      if (!isNamedWheel && !isFrontSteeringPivot && !isFrontCaliper && !isRearCaliper) return;
       // GLTF nodes authored with a matrix keep matrixAutoUpdate disabled. Decompose
       // their existing pivot transform before changing quaternions each frame.
       object.matrix.decompose(object.position, object.quaternion, object.scale);
@@ -384,15 +734,24 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
       if (isNamedWheel) wheelNodes.push(object);
       if (isFrontSteeringPivot) steeringPivotNodes.push(object);
       if (isFrontCaliper) caliperNodes.push(object);
+      if (isRearCaliper) rearCaliperNodes.push(object);
     });
     cached.references += 1;
     visual.modelInstance = instance;
+    const lampMaterials: THREE.Material[] = [];
     visual.releaseModel = () => {
+      for (const material of lampMaterials) material.dispose();
       cached.references = Math.max(0, cached.references - 1);
       releaseModelIfUnused(spec.modelPath, cached);
     };
     visual.root.add(instance);
     visual.root.updateWorldMatrix(true, true);
+    const wasBraking = visual.lights.brake;
+    const wasReversing = visual.lights.reverse;
+    setVehicleLights(visual, false, false);
+    disposeBrakeGlow(visual.lights);
+    visual.lights = findModelLights(instance, visual.root, spec, lampMaterials);
+    setVehicleLights(visual, wasBraking, wasReversing);
     const rootInverseQuaternion = visual.root.getWorldQuaternion(new THREE.Quaternion()).invert();
     const forward = new THREE.Vector3(0, 0, 1);
     const down = new THREE.Vector3(0, -1, 0);
@@ -472,6 +831,9 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
     if (wheelNodes.length !== 4) {
       console.warn('Araçta 4 tekerlek pivotu bulunamadı:', spec.id, wheelNodes.map((node) => node.name));
     }
+    if (visual.modelWheels.length === 4) {
+      visual.suspension = buildModelSuspension(visual, steeringPivotNodes, [...caliperNodes, ...rearCaliperNodes]);
+    }
     visual.procedural.visible = false;
     visual.modelLoaded = true;
     return true;
@@ -514,6 +876,63 @@ function disposeObjectResources(object: THREE.Object3D): void {
   for (const material of materials) material.dispose();
 }
 
+/**
+ * Groups each model wheel with the nodes that must follow its suspension travel:
+ * the wheel itself, or the steering pivot carrying it, plus any loose caliper.
+ */
+function buildModelSuspension(
+  visual: VehicleVisual,
+  steeringPivots: readonly THREE.Object3D[],
+  calipers: readonly THREE.Object3D[],
+): WheelSuspension[] {
+  visual.root.updateWorldMatrix(true, true);
+  const rootInverse = visual.root.matrixWorld.clone().invert();
+  const travelEntry = (node: THREE.Object3D) => {
+    // Vehicle "up" by one metre, expressed in the node's parent space.
+    const parentWorld = node.parent?.matrixWorld ?? new THREE.Matrix4();
+    const rootToParent = parentWorld.clone().invert().multiply(visual.root.matrixWorld);
+    const up = new THREE.Vector3(0, 1, 0).applyMatrix3(new THREE.Matrix3().setFromMatrix4(rootToParent));
+    node.matrix.decompose(node.position, node.quaternion, node.scale);
+    node.matrixAutoUpdate = true;
+    return { node, rest: node.position.clone(), up };
+  };
+  const moved = new Set<THREE.Object3D>();
+  const suspension = visual.modelWheels.map((wheel) => {
+    const center = getWheelLocalBounds(wheel.node).getCenter(new THREE.Vector3())
+      .applyMatrix4(wheel.node.matrixWorld).applyMatrix4(rootInverse);
+    let carrier = wheel.node;
+    for (let parent = wheel.node.parent; parent; parent = parent.parent) {
+      if (steeringPivots.includes(parent)) carrier = parent;
+    }
+    moved.add(carrier);
+    return { x: center.x, z: center.z, nodes: [travelEntry(carrier)] };
+  });
+  const isUnderMovedNode = (node: THREE.Object3D): boolean => {
+    for (let parent = node.parent; parent; parent = parent.parent) if (moved.has(parent)) return true;
+    return false;
+  };
+  for (const caliper of calipers) {
+    if (moved.has(caliper) || isUnderMovedNode(caliper)) continue;
+    const position = new THREE.Box3().setFromObject(caliper).getCenter(new THREE.Vector3()).applyMatrix4(rootInverse);
+    let nearest = suspension[0];
+    for (const entry of suspension) {
+      if (Math.hypot(entry.x - position.x, entry.z - position.z) < Math.hypot(nearest.x - position.x, nearest.z - position.z)) nearest = entry;
+    }
+    nearest.nodes.push(travelEntry(caliper));
+  }
+  return suspension;
+}
+
+/** Moves every wheel by its suspension travel (metres, + is up toward the body). */
+export function setVehicleSuspension(visual: VehicleVisual, travel: readonly number[]): void {
+  for (let i = 0; i < visual.suspension.length; i += 1) {
+    for (const part of visual.suspension[i].nodes) {
+      part.node.position.copy(part.rest).addScaledVector(part.up, travel[i] ?? 0);
+      part.node.updateMatrix();
+    }
+  }
+}
+
 function getWheelLocalBounds(node: THREE.Object3D): THREE.Box3 {
   node.updateWorldMatrix(true, true);
   const inverseNodeWorld = node.matrixWorld.clone().invert();
@@ -540,6 +959,7 @@ export function disposeVehicleVisual(visual: VehicleVisual): void {
   visual.modelSteeringNodes = [];
   visual.releaseModel?.();
   visual.releaseModel = null;
+  disposeBrakeGlow(visual.lights);
   visual.root.clear();
 }
 

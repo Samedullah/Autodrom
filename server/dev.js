@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 
 const node = process.execPath;
 const children = [
-  spawn(node, ['server/index.js'], { stdio: 'inherit' }),
+  // --watch restarts the room server when its code changes (rooms are in memory, so they reset).
+  spawn(node, ['--watch', 'server/index.js'], { stdio: 'inherit' }),
   spawn(node, ['node_modules/vite/bin/vite.js', '--host', '0.0.0.0'], { stdio: 'inherit' }),
 ];
 let stopping = false;

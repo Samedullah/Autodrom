@@ -7,7 +7,7 @@ import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel } from
 export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'pause' | 'store' | 'multiplayer' | null;
 export type UiAction = 'start' | 'continue' | 'starter' | 'garage' | 'store' | 'maps' | 'settings' | 'pause'
   | 'resume' | 'main' | 'select-starter' | 'buy' | 'activate' | 'choose-map' | 'close' | 'fullscreen' | 'reset-position'
-  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift'
+  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift' | 'toggle-tcs'
   | 'multiplayer' | 'multiplayer-create' | 'multiplayer-join' | 'multiplayer-leave' | 'copy-room';
 
 export interface UiSnapshot {
@@ -44,15 +44,13 @@ export class GameInterface {
   private readonly modalHost: HTMLElement;
   private readonly speedValue: HTMLElement;
   private readonly gearValue: HTMLElement;
-  private readonly rpmValue: HTMLElement;
-  private readonly rpmRing: HTMLElement;
-  private readonly driftBadge: HTMLElement;
+  private readonly tach: HTMLElement;
+  private readonly tachNeedle: SVGGElement;
   private readonly driftModeButton: HTMLButtonElement;
+  private readonly tcsLamp: SVGSVGElement;
   private readonly cashValue: HTMLElement;
   private readonly mapValue: HTMLElement;
   private readonly incomeToast: HTMLElement;
-  private readonly carName: HTMLElement;
-  private readonly className: HTMLElement;
   private readonly messageToast: HTMLElement;
   private readonly devCodeOverlay: HTMLElement;
   private readonly devCodeInput: HTMLInputElement;
@@ -71,7 +69,7 @@ export class GameInterface {
     host.innerHTML = '<div class="hud-layer">' +
       '<header class="topbar">' +
         '<div class="brand-lockup"><span class="brand-mark">A</span><span><b>AUTODROM</b><small>DRIVE&nbsp; / &nbsp;BUILD</small></span></div>' +
-        '<div class="cash-card"><span class="cash-label">GARAJ BAKİYESİ</span><strong id="cash-value">₺10.000</strong><i class="cash-dot"></i></div>' +
+        '<div class="cash-card"><span class="cash-label">GARAJ BAKİYESİ</span><strong id="cash-value">₺10.000</strong><i class="cash-dot"></i><div class="income-toast" id="income-toast"></div></div>' +
         '<div class="top-meta"><span class="live-chip"><i></i> CANLI SÜRÜŞ</span><span class="map-pill" id="map-value">ŞEHİR İÇİ</span><button class="multiplayer-toggle" type="button" data-action="multiplayer" aria-label="Multiplayer odaları">ONLINE</button><button class="drift-mode-toggle" type="button" data-action="toggle-drift" aria-label="Drift modunu aç" aria-pressed="false"><span>DRIFT</span><b>KAPALI</b></button><button class="icon-button pause-button" data-action="pause" aria-label="Oyunu duraklat">Ⅱ</button></div>' +
       '</header>' +
       '<nav class="side-rail" aria-label="Oyun menüsü">' +
@@ -81,11 +79,11 @@ export class GameInterface {
         '<button class="rail-button" data-action="maps" aria-label="Harita seç"><span>⌖</span><small>HARİTA</small></button>' +
         '<button class="rail-button" data-action="settings" aria-label="Ayarlar"><span>⚙</span><small>AYARLAR</small></button>' +
       '</nav>' +
-      '<div class="vehicle-chip"><span class="vehicle-chip-label">AKTİF ARAÇ</span><b id="car-name">METRO S1</b><span class="class-chip" id="class-name">ŞEHİR</span></div>' +
       '<div class="speed-cluster">' +
-        '<div class="speed-ring" id="rpm-ring"><div class="speed-inner"><small>HIZ</small><strong id="speed-value">0</strong><span>KM/SA</span></div></div>' +
-        '<div class="gear-panel"><span>VİTES</span><b id="gear-value">1</b><small><span id="rpm-value">850</span> RPM</small></div>' +
-        '<div class="drift-indicator" id="drift-indicator">DRIFT</div>' +
+        '<div class="tach" id="tach">' + TACHOMETER_SVG +
+          '<b class="tach-gear" id="gear-value" aria-label="Vites">1</b>' + TCS_LAMP_SVG +
+          '<span class="tach-speed"><strong id="speed-value" aria-label="Hız">0</strong><small>KM/SA</small></span>' +
+        '</div>' +
       '</div>' +
       '<div class="drive-hint"><span>W</span><span>A</span><span>S</span><span>D</span><i>GAZ / DİREKSİYON</i><em></em><kbd>Q</kbd><kbd>E</kbd><i>VİTES</i><em></em><kbd>SPACE</kbd><i>EL FRENİ</i></div>' +
       '<div class="touch-controls" aria-label="Dokunmatik sürüş kontrolleri">' +
@@ -93,7 +91,6 @@ export class GameInterface {
         '<div class="touch-pedals" aria-label="Pedallar"><button type="button" class="touch-button brake-button" data-control="brake" aria-label="Fren"><span>FREN</span></button><div class="touch-pedal-stack"><button type="button" class="touch-button handbrake-button" data-control="handbrake" aria-label="El freni"><span>EL FRENİ</span></button><button type="button" class="touch-button gas-button" data-control="gas" aria-label="Gaz"><span>GAZ</span></button></div></div>' +
         '<div class="touch-gears" aria-label="Vites"><button type="button" class="touch-button shift-button" data-action="shift-down" aria-label="Vitesi düşür"><span>− VİTES</span></button><button type="button" class="touch-button shift-button" data-action="shift-up" aria-label="Vitesi yükselt"><span>+ VİTES</span></button></div>' +
       '</div>' +
-      '<div class="income-toast" id="income-toast"></div>' +
       '<div class="message-toast" id="message-toast"></div>' +
       '<div class="dev-code-overlay" id="dev-code-overlay" hidden><section class="dev-code-panel" role="dialog" aria-modal="true" aria-labelledby="dev-code-title">' +
         '<div class="dev-code-heading"><span class="dev-code-mark">⌘</span><button class="close-button" data-action="close-dev-code" aria-label="Kapat">×</button></div>' +
@@ -103,17 +100,16 @@ export class GameInterface {
         '<div class="dev-code-status" id="dev-code-status" aria-live="polite">Kod büyük/küçük harfe duyarlı değil.</div>' +
         '<button class="button-primary full" type="submit"><span>KODU KULLAN</span><b>↗</b></button></form>' +
         '<small class="dev-code-shortcut">T ile aç · ESC ile kapat</small></section></div>' +
-      '<div class="mini-status"><span class="status-dot"></span> OYUN KAYDI AÇIK <span class="status-separator">·</span> 3 SN GELİR DÖNGÜSÜ</div>' +
       '<div id="modal-host"></div>' +
     '</div>';
     this.hud = host.querySelector('.hud-layer') as HTMLElement;
     this.modalHost = host.querySelector('#modal-host') as HTMLElement;
     this.speedValue = host.querySelector('#speed-value') as HTMLElement;
     this.gearValue = host.querySelector('#gear-value') as HTMLElement;
-    this.rpmValue = host.querySelector('#rpm-value') as HTMLElement;
-    this.rpmRing = host.querySelector('#rpm-ring') as HTMLElement;
-    this.driftBadge = host.querySelector('#drift-indicator') as HTMLElement;
-    this.driftModeButton = host.querySelector('.drift-mode-toggle') as HTMLButtonElement;
+    this.tach = host.querySelector('#tach') as HTMLElement;
+    this.tachNeedle = host.querySelector('#tach-needle') as SVGGElement;
+    this.driftModeButton = host.querySelector('[data-action="toggle-drift"]') as HTMLButtonElement;
+    this.tcsLamp = host.querySelector('.tcs-lamp') as SVGSVGElement;
     this.cashValue = host.querySelector('#cash-value') as HTMLElement;
     this.mapValue = host.querySelector('#map-value') as HTMLElement;
     this.incomeToast = host.querySelector('#income-toast') as HTMLElement;
@@ -121,8 +117,6 @@ export class GameInterface {
     this.devCodeOverlay = host.querySelector('#dev-code-overlay') as HTMLElement;
     this.devCodeInput = host.querySelector('#dev-code-input') as HTMLInputElement;
     this.devCodeStatus = host.querySelector('#dev-code-status') as HTMLElement;
-    this.carName = host.querySelector('#car-name') as HTMLElement;
-    this.className = host.querySelector('#class-name') as HTMLElement;
     host.addEventListener('click', this.onClick);
     host.addEventListener('submit', this.onSubmit);
     host.addEventListener('keydown', this.onKeyDown);
@@ -256,23 +250,17 @@ export class GameInterface {
     this.snapshot = snapshot;
     this.cashValue.textContent = '₺' + money.format(snapshot.save.cash);
     this.mapValue.textContent = MAP_LABELS[snapshot.map].toLocaleUpperCase('tr-TR');
-    this.carName.textContent = snapshot.activeVehicle.shortName;
-    this.className.textContent = CLASS_LABELS[snapshot.activeVehicle.category];
     if (this.currentScreen && renderModal) this.renderScreen();
   }
 
   updateTelemetry(telemetry: Telemetry): void {
     this.speedValue.textContent = String(Math.round(telemetry.speedKmh));
     this.gearValue.textContent = telemetry.gear === -1 ? 'R' : telemetry.gear === 0 ? 'N' : String(telemetry.gear);
-    this.rpmValue.textContent = telemetry.rpm.toLocaleString('tr-TR');
-    const normalizedRpm = Math.max(0, Math.min(1, (telemetry.rpm - 850) / (7050 - 850)));
     const limiter = telemetry.rpm >= 6900;
-    const color = limiter ? '#ff4f59' : telemetry.rpm >= 5200 ? '#f2b45f' : '#79dda6';
-    this.rpmRing.style.setProperty('--rpm-progress', (normalizedRpm * 270).toFixed(1) + 'deg');
-    this.rpmRing.style.setProperty('--rpm-color', color);
-    this.rpmRing.classList.toggle('limiter', limiter);
-    this.rpmValue.parentElement?.classList.toggle('limiter', limiter);
-    this.driftBadge.classList.toggle('active', telemetry.drifting);
+    const needleAngle = tachAngle(Math.max(0, Math.min(TACH_MAX, telemetry.rpm / 1000)));
+    this.tachNeedle.style.transform = 'rotate(' + needleAngle.toFixed(1) + 'deg)';
+    this.tach.classList.toggle('limiter', limiter);
+    this.tcsLamp.classList.toggle('intervening', telemetry.tcsActive);
   }
 
   setDriftModeEnabled(enabled: boolean): void {
@@ -280,6 +268,13 @@ export class GameInterface {
     this.driftModeButton.setAttribute('aria-pressed', String(enabled));
     this.driftModeButton.setAttribute('aria-label', enabled ? 'Drift modunu kapat' : 'Drift modunu aç');
     this.driftModeButton.querySelector('b')!.textContent = enabled ? 'AÇIK' : 'KAPALI';
+  }
+
+  setTcsEnabled(enabled: boolean): void {
+    this.tcsLamp.classList.toggle('off', !enabled);
+    this.tcsLamp.setAttribute('aria-pressed', String(enabled));
+    this.tcsLamp.setAttribute('aria-label', enabled ? 'Çekiş kontrolünü kapat (T)' : 'Çekiş kontrolünü aç (T)');
+    if (!enabled) this.tcsLamp.classList.remove('intervening');
   }
 
   setMultiplayerInfo(status: string, connected: boolean, roomCode = '', playerCount = 1): void {
@@ -523,9 +518,10 @@ export class GameInterface {
   private mapMenu(inGame: boolean): string {
     const maps: Array<{ id: MapId; title: string; description: string; image: string; tag: string }> = [
       { id: 'city-highway', title: 'Şehir + Otoban', description: 'Şehir caddelerinden bağlantı yoluyla çevre otobanına kesintisiz sürüş. Hız kapılarında 200 km/sa ile geçip ₺5.000 kazan.', image: 'city-highway', tag: 'TEK, BAĞLI DÜNYA' },
+      { id: 'spa', title: 'Spa-Francorchamps', description: '1992 düzeninde efsanevi Belçika pisti: La Source, Eau Rouge ve Raidillon dahil ~100 metrelik iniş çıkış, bariyerler ve pit binaları.', image: 'spa', tag: 'YARIŞ PİSTİ' },
     ];
     return '<div class="modal-shell centered-modal"><div class="panel-topline"><div><div class="eyebrow">SÜRÜŞ ORTAMI</div><h2>Harita seçimi</h2></div><button class="close-button" data-action="' + (inGame || this.snapshot.save.starterChosen ? 'close' : 'main') + '">×</button></div>' +
-      '<p class="modal-description">Şehir caddeleri ve çevre otobanı aynı haritada birbirine bağlı.</p><div class="map-cards">' +
+      '<p class="modal-description">Şehir ve otoban birbirine bağlı tek dünya, ya da gerçek iniş çıkışlarıyla bir yarış pisti.</p><div class="map-cards">' +
       maps.map((map) => '<button class="map-card ' + map.image + (this.snapshot.map === map.id ? ' current' : '') + '" data-action="choose-map" data-id="' + map.id + '">' +
         '<span class="map-art"><i></i><b></b><em></em></span><span class="map-tag">' + map.tag + '</span>' +
         '<span class="map-card-copy"><b>' + map.title + '</b><small>' + map.description + '</small></span><span class="map-card-bottom">' + (this.snapshot.map === map.id ? 'ŞU ANKİ HARİTA' : 'HARİTAYA GİT') + '<i>↗</i></span></button>').join('') +
@@ -545,7 +541,7 @@ export class GameInterface {
       '</section><section class="settings-section"><div class="settings-section-head"><span>02</span><div><b>KAMERA & KONTROLLER</b><small>Takip hissini ve sürüşü ayarla</small></div></div>' +
         '<label class="setting-row"><span><b>Vites sistemi</b><small>Otomatikte 6.700 dev/dak yükseltir, uygun devirde küçültür</small></span><select data-setting="transmissionMode"><option value="manual"' + selected(settings.transmissionMode === 'manual') + '>Manuel</option><option value="automatic"' + selected(settings.transmissionMode === 'automatic') + '>Otomatik</option></select></label>' +
         '<label class="setting-row range-row"><span><b>Kamera takibi</b><small>Yumuşak takip <strong data-camera-value>' + percent.format(settings.cameraFollow * 100) + '%</strong></small></span><input type="range" min="4" max="24" value="' + Math.round(settings.cameraFollow * 100) + '" data-setting="cameraFollow"></label>' +
-        '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
+        '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>T</kbd><span>Çekiş kontrolü (TCS)</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
       '</section></div><div class="settings-bottom"><span>AYARLAR BU TARAYICIDA KAYDEDİLİR</span><button class="button-primary compact" data-action="close"><span>UYGULA</span><b>✓</b></button></div></div>';
   }
 
@@ -700,6 +696,65 @@ function specBar(label: string, value: number, max: number, unit: string): strin
   const fill = Math.max(6, Math.min(100, (value / max) * 100));
   return '<div class="spec-row"><div><span>' + label + '</span><b>' + value + '<i>' + unit + '</i></b></div><span class="spec-track"><i style="width:' + fill + '%"></i></span></div>';
 }
+
+// Tachometer dial in ×1000 RPM. 0 sits at the bottom and the scale sweeps
+// clockwise over the left and the top, NFS style, with a red zone at the end.
+const TACH_MAX = 8;
+const TACH_REDLINE = 7;
+const TACH_START_DEG = 180;
+const TACH_DEG_PER_UNIT = 28;
+
+function tachAngle(value: number): number {
+  return TACH_START_DEG + value * TACH_DEG_PER_UNIT;
+}
+
+function tachPoint(angleDeg: number, radius: number): string {
+  const a = THREE.MathUtils.degToRad(angleDeg);
+  return (100 + radius * Math.sin(a)).toFixed(2) + ' ' + (100 - radius * Math.cos(a)).toFixed(2);
+}
+
+function tachArc(fromDeg: number, toDeg: number, radius: number): string {
+  const large = toDeg - fromDeg > 180 ? 1 : 0;
+  return 'M ' + tachPoint(fromDeg, radius) + ' A ' + radius + ' ' + radius + ' 0 ' + large + ' 1 ' + tachPoint(toDeg, radius);
+}
+
+const TACHOMETER_SVG = (() => {
+  let ticks = '';
+  let labels = '';
+  for (let step = 0; step <= TACH_MAX * 2; step += 1) {
+    const value = step / 2;
+    const angle = tachAngle(value);
+    const major = step % 2 === 0;
+    const red = value >= TACH_REDLINE;
+    ticks += '<path d="M ' + tachPoint(angle, major ? 79 : 84) + ' L ' + tachPoint(angle, 91) + '" class="tach-tick' + (major ? ' major' : '') + (red ? ' red' : '') + '"/>';
+    if (major) {
+      const [x, y] = tachPoint(angle, 66).split(' ');
+      labels += '<text x="' + x + '" y="' + y + '" class="tach-label' + (red ? ' red' : '') + '">' + value + '</text>';
+    }
+  }
+  return '<svg class="tach-dial" viewBox="0 0 200 200" aria-hidden="true">' +
+    '<circle cx="100" cy="100" r="97" class="tach-face"/>' +
+    '<path d="' + tachArc(tachAngle(-0.35), tachAngle(TACH_MAX + 0.35), 85) + '" class="tach-band"/>' +
+    '<path d="' + tachArc(tachAngle(TACH_REDLINE), tachAngle(TACH_MAX + 0.35), 88) + '" class="tach-redzone"/>' +
+    ticks + labels +
+    '<path d="' + tachArc(205, 330, 47) + '" class="tach-inner-arc"/>' +
+    '<circle cx="100" cy="100" r="38" class="tach-hub"/>' +
+    '<g id="tach-needle" class="tach-needle" style="transform: rotate(' + tachAngle(0) + 'deg)">' +
+      '<g class="tach-needle-shake"><path d="M 98.2 112 L 99.3 22 L 100.7 22 L 101.8 112 Z"/></g>' +
+    '</g>' +
+    '<circle cx="100" cy="100" r="7.5" class="tach-pivot"/>' +
+  '</svg>';
+})();
+
+// Dashboard traction-control warning light: car with skid lines, "OFF" when disabled.
+// Dark while TCS waits, flashing while it cuts torque, steady with OFF when switched off.
+// Tapping it toggles TCS (touch screens have no T key).
+const TCS_LAMP_SVG = '<svg class="tcs-lamp" viewBox="0 0 24 30" role="button" data-action="toggle-tcs" aria-pressed="true" aria-label="Çekiş kontrolünü kapat (T)">' +
+  '<path fill-rule="evenodd" d="M6.8 3.5h10.4l1.9 4.2h1.4V9h-1v4.6h-2V15h-2.2v-1.4H8.7V15H6.5v-1.4h-2V9h-1V7.7h1.4z' +
+    'M8 5h8l1.1 2.7H6.9z M6.1 10h2.6v1.5H6.1z M15.3 10h2.6v1.5h-2.6z"/>' +
+  '<path class="tcs-lamp-skid" d="M9.6 16.4c-2 .9-2 1.9 0 2.8s2 1.9 0 2.8 M16.4 16.4c-2 .9-2 1.9 0 2.8s2 1.9 0 2.8"/>' +
+  '<text class="tcs-lamp-off" x="12" y="28.6">OFF</text>' +
+'</svg>';
 
 function escapeHtml(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');

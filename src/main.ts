@@ -1,7 +1,7 @@
 import './styles.css';
 import { DriveEngine, type Telemetry } from './engine';
 import { STARTER_VEHICLES, VEHICLES, type MapId, type VehicleSpec } from './data';
-import { saveGame, loadSave, loadSettings, saveSettings, type SaveData, type GameSettings } from './save';
+import { isValidMap, saveGame, loadSave, loadSettings, saveSettings, type SaveData, type GameSettings } from './save';
 import { GameInterface, type Screen, type UiAction, type UiSnapshot } from './ui';
 import { MultiplayerClient } from './multiplayer';
 
@@ -17,7 +17,7 @@ let currentScreen: Screen = 'main';
 let returnScreen: Screen = 'main';
 let ui: GameInterface | null = null;
 let devCodeResumeDriving = false;
-let lastTelemetry: Telemetry = { speedKmh: 0, gear: 1, rpm: 850, drifting: false };
+let lastTelemetry: Telemetry = { speedKmh: 0, gear: 1, rpm: 850, drifting: false, tcsActive: false };
 const purchaseLocks = new Set<string>();
 
 function isMobileViewport(): boolean {
@@ -57,6 +57,7 @@ const engine = new DriveEngine(gameHost, activeVehicle, currentMap, settings, {
     ui?.showMessage('HIZ YETERSİZ', '₺5.000 ödül için hız kapısından en az 200 km/sa ile geç.', true);
   },
   onDevCode: () => toggleDevCodePanel(),
+  onToggleTcs: () => ui?.setTcsEnabled(engine.toggleTcs()),
   onTelemetry: (telemetry) => {
     lastTelemetry = telemetry;
     ui?.updateTelemetry(telemetry);
@@ -91,6 +92,38 @@ multiplayer.setListeners(
   },
 );
 ui.updateTelemetry(lastTelemetry);
+
+// Loading screen (markup in index.html): up until the active car, its sounds,
+// the map and its shaders are ready, so the game starts without hitches. Shown
+// again while a map that streams its model loads.
+const loadingScreen = document.querySelector<HTMLElement>('#loading');
+
+function showLoading(): void {
+  if (!loadingScreen) return;
+  reportLoading(0, 'Yükleniyor');
+  loadingScreen.classList.remove('done');
+}
+
+function reportLoading(share: number, text: string): void {
+  if (!loadingScreen) return;
+  const value = Math.round(share * 100);
+  const fill = loadingScreen.querySelector<HTMLElement>('.loading-fill');
+  const label = loadingScreen.querySelector<HTMLElement>('.loading-label');
+  const percent = loadingScreen.querySelector<HTMLElement>('.loading-percent');
+  if (fill) fill.style.width = value + '%';
+  if (label) label.textContent = text;
+  if (percent) percent.textContent = value + '%';
+  loadingScreen.setAttribute('aria-valuenow', String(value));
+}
+
+function hideLoading(): void {
+  reportLoading(1, 'Hazır');
+  loadingScreen?.classList.add('done');
+}
+
+engine.prepare(reportLoading)
+  .catch((error: unknown) => console.warn('Ön yükleme tamamlanamadı:', error))
+  .finally(hideLoading);
 
 function toggleDevCodePanel(): void {
   if (!ui) return;
@@ -151,6 +184,10 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
     ui?.setDriftModeEnabled(engine.toggleDriftMode());
     return;
   }
+  if (action === 'toggle-tcs') {
+    ui?.setTcsEnabled(engine.toggleTcs());
+    return;
+  }
   if (action === 'start' || action === 'continue' || action === 'starter' || action === 'select-starter') {
     requestMobileFullscreen();
   }
@@ -184,7 +221,7 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
       return;
     }
     setScreen(null);
-    engine.setMap(currentMap);
+    void engine.setMap(currentMap);
     engine.setVehicle(activeVehicle);
     return;
   }
@@ -239,17 +276,29 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
     return;
   }
   if (action === 'choose-map' && id) {
-    const mapId: MapId = 'city-highway';
+    if (!isValidMap(id)) return;
+    const mapId: MapId = id;
     const previous = returnScreen;
+    const switching = mapId !== currentMap;
     currentMap = mapId;
     save.map = mapId;
     saveGame(save);
-    engine.setMap(mapId);
-    if (previous === null) setScreen(null);
-    else if (previous === 'pause') setScreen('pause');
-    else if (previous === 'starter') setScreen('starter');
-    else setScreen('main');
+    const next: Screen = previous === null || previous === 'pause' || previous === 'starter' ? previous : 'main';
+    if (!switching) {
+      setScreen(next);
+      updateUi();
+      return;
+    }
+    // Hold driving under the loading screen until the new map is in place.
+    setScreen(next === null ? 'pause' : next);
     updateUi();
+    showLoading();
+    engine.setMap(mapId, reportLoading)
+      .catch((error: unknown) => console.warn('Harita yüklenemedi:', error))
+      .finally(() => {
+        hideLoading();
+        if (currentMap === mapId) setScreen(next);
+      });
     return;
   }
   if (action === 'buy' && id) {
