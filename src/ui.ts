@@ -8,7 +8,7 @@ import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel } from
 export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'pause' | 'store' | 'multiplayer' | null;
 export type UiAction = 'start' | 'continue' | 'starter' | 'garage' | 'store' | 'maps' | 'settings' | 'pause'
   | 'resume' | 'main' | 'select-starter' | 'buy' | 'activate' | 'choose-map' | 'close' | 'fullscreen' | 'reset-position'
-  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift' | 'toggle-tcs'
+  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'open-dev-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift' | 'toggle-tcs'
   | 'multiplayer' | 'multiplayer-create' | 'multiplayer-join' | 'multiplayer-leave' | 'copy-room';
 
 export interface UiSnapshot {
@@ -543,7 +543,7 @@ export class GameInterface {
         '<label class="setting-row"><span><b>Vites sistemi</b><small>Otomatikte 6.700 dev/dak yükseltir, uygun devirde küçültür</small></span><select data-setting="transmissionMode"><option value="manual"' + selected(settings.transmissionMode === 'manual') + '>Manuel</option><option value="automatic"' + selected(settings.transmissionMode === 'automatic') + '>Otomatik</option></select></label>' +
         '<label class="setting-row range-row"><span><b>Kamera takibi</b><small>Yumuşak takip <strong data-camera-value>' + percent.format(settings.cameraFollow * 100) + '%</strong></small></span><input type="range" min="4" max="24" value="' + Math.round(settings.cameraFollow * 100) + '" data-setting="cameraFollow"></label>' +
         '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>T</kbd><span>Çekiş kontrolü (TCS)</span></div><div><kbd>P</kbd><span>Geliştirici paneli (saat, yağmur)</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
-      '</section></div><div class="settings-bottom"><span>AYARLAR BU TARAYICIDA KAYDEDİLİR</span><button class="button-primary compact" data-action="close"><span>UYGULA</span><b>✓</b></button></div></div>';
+      '</section></div><div class="settings-bottom"><span>AYARLAR BU TARAYICIDA KAYDEDİLİR</span><div class="settings-bottom-actions"><button class="button-secondary compact" data-action="open-dev-code"><span>GİZLİ KLASÖR</span><b>⌘</b></button><button class="button-primary compact" data-action="close"><span>UYGULA</span><b>✓</b></button></div></div></div>';
   }
 
   private pauseMenu(): string {

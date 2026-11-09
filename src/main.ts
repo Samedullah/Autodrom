@@ -224,6 +224,10 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
     closeDevCodePanel();
     return;
   }
+  if (action === 'open-dev-code') {
+    ui?.openDevCode();
+    return;
+  }
   if (action === 'redeem-code') {
     if ((id ?? '').trim().toLowerCase() !== 'dev code') {
       ui?.showDevCodeStatus('Kod geçersiz. Tekrar dene.');

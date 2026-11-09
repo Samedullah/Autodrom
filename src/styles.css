@@ -454,6 +454,8 @@ button { color: inherit; }
 .control-guide span { margin-left: 2px; color: #99a69b; font-size: 8px; white-space: nowrap; }
 .settings-bottom { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .settings-bottom > span { color: #77877a; font: 500 7px var(--mono); letter-spacing: .11em; }
+.settings-bottom-actions { display: flex; align-items: center; gap: 8px; }
+.settings-bottom-actions .button-secondary.compact { min-height: 38px; padding: 0 13px; font-size: 8px; }
 
 .pause-shell { display: flex; align-items: center; justify-content: center; background: rgba(10, 16, 12, .68); backdrop-filter: blur(6px); }
 .pause-card { width: 355px; padding: 27px 26px 18px; border: 1px solid rgba(229, 240, 226, .16); border-radius: 15px; background: rgba(19, 28, 22, .96); box-shadow: 0 25px 75px rgba(0, 0, 0, .42); }
