@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { MapId } from './data';
 import type { GameSettings } from './save';
-import { createSpaWorld } from './spa';
+import { createBushidoPeakWorld, createNurburgringWorld, createSpaWorld } from './spa';
 import type { HeightGrid, WallGrid } from './terrain';
 
 export interface WorldCollider {
@@ -594,7 +594,13 @@ export function freezeStatic(root: THREE.Object3D): void {
 }
 
 export function buildWorld(mapId: MapId, settings: GameSettings): WorldData {
-  const world = mapId === 'spa' ? createSpaWorld(settings) : buildCityHighwayWorld(settings);
+  const world = mapId === 'spa'
+    ? createSpaWorld(settings)
+    : mapId === 'nurburgring'
+      ? createNurburgringWorld(settings)
+      : mapId === 'bushido-peak'
+        ? createBushidoPeakWorld(settings)
+        : buildCityHighwayWorld(settings);
   freezeStatic(world.root);
   return world;
 }

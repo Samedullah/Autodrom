@@ -6,6 +6,7 @@ import type { VehicleSpec } from './data';
 import { GLOW_LAYER } from './lampBloom';
 import { applyVarnishQuality, refineVehicleMaterials, setVarnishQualityDefault } from './vehicleMaterials';
 import type { GameSettings } from './save';
+import type { StanceConfig } from './stancePanel';
 
 export interface VehicleVisual {
   root: THREE.Group;
@@ -13,6 +14,7 @@ export interface VehicleVisual {
   steerWheels: THREE.Group[];
   spinQuaternion: THREE.Quaternion;
   steerQuaternion: THREE.Quaternion;
+  camberQuaternion: THREE.Quaternion;
   wheelRadius: number;
   procedural: THREE.Group;
   modelLoaded: boolean;
@@ -21,6 +23,8 @@ export interface VehicleVisual {
     rest: THREE.Quaternion;
     axis: THREE.Vector3;
     steerAxis: THREE.Vector3;
+    camberAxis: THREE.Vector3;
+    sideSign: number;
     isFront: boolean;
     steerWithParent: boolean;
     radius: number;
@@ -30,6 +34,7 @@ export interface VehicleVisual {
     node: THREE.Object3D;
     rest: THREE.Quaternion;
     steerAxis: THREE.Vector3;
+    sideSign: number;
   }>;
   modelInstance: THREE.Object3D | null;
   releaseModel: (() => void) | null;
@@ -295,7 +300,14 @@ export interface WheelSuspension {
   x: number;
   z: number;
   /** Nodes that travel up and down with this wheel (wheel or steering pivot, calipers). */
-  nodes: Array<{ node: THREE.Object3D; rest: THREE.Vector3; up: THREE.Vector3 }>;
+  nodes: Array<{
+    node: THREE.Object3D;
+    rest: THREE.Vector3;
+    restScale: THREE.Vector3;
+    up: THREE.Vector3;
+    outward: THREE.Vector3;
+    isWheelCarrier: boolean;
+  }>;
 }
 
 const modelLoader = new GLTFLoader();
@@ -642,7 +654,14 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
       if (z === axleFront) steerWheels.push(steeringPivot);
       suspension.push({
         x: side * wheelX, z,
-        nodes: [{ node: steeringPivot, rest: steeringPivot.position.clone(), up: new THREE.Vector3(0, 1, 0) }],
+        nodes: [{
+          node: steeringPivot,
+          rest: steeringPivot.position.clone(),
+          restScale: steeringPivot.scale.clone(),
+          up: new THREE.Vector3(0, 1, 0),
+          outward: new THREE.Vector3(side, 0, 0),
+          isWheelCarrier: true,
+        }],
       });
     }
   }
@@ -681,6 +700,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
     steerWheels,
     spinQuaternion: new THREE.Quaternion(),
     steerQuaternion: new THREE.Quaternion(),
+    camberQuaternion: new THREE.Quaternion(),
     wheelRadius,
     procedural,
     modelLoaded: false,
@@ -801,6 +821,8 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
       cached.references = Math.max(0, cached.references - 1);
       releaseModelIfUnused(spec.modelPath, cached);
     };
+    visual.root.position.set(0, 0, 0);
+    visual.root.rotation.set(0, 0, 0);
     visual.root.add(instance);
     visual.root.updateWorldMatrix(true, true);
     const wasBraking = visual.lights.brake;
@@ -841,9 +863,14 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
       ...steeringPivotNodes,
       ...caliperNodes.filter((node) => !hasSteeringPivotAncestor(node)),
     ];
+    const rootInverseMatrix = visual.root.matrixWorld.clone().invert();
     visual.modelWheels = wheelNodes.length === 4
       ? wheelNodes.map((node) => {
         const bounds = getWheelLocalBounds(node);
+        const centerInRoot = bounds.getCenter(new THREE.Vector3())
+          .applyMatrix4(node.matrixWorld)
+          .applyMatrix4(rootInverseMatrix);
+        const sideSign = centerInRoot.x >= 0 ? 1 : -1;
         const size = bounds.getSize(new THREE.Vector3());
         const dimensions = [size.x, size.y, size.z];
         const axleIndex = dimensions.indexOf(Math.min(...dimensions));
@@ -868,22 +895,40 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
         const positiveRotationTravel = new THREE.Vector3().crossVectors(axleInVehicle, down).dot(forward);
         const spinDirection = positiveRotationTravel >= 0 ? -1 : 1;
         const parentQuaternion = node.parent?.getWorldQuaternion(new THREE.Quaternion()) ?? new THREE.Quaternion();
-        const parentRelativeQuaternion = rootInverseQuaternion.clone().multiply(parentQuaternion);
+        const invParentRel = rootInverseQuaternion.clone().multiply(parentQuaternion).invert();
         const steerAxis = new THREE.Vector3(0, 1, 0)
-          .applyQuaternion(parentRelativeQuaternion.invert())
+          .applyQuaternion(invParentRel)
+          .normalize();
+        const camberAxis = new THREE.Vector3(0, 0, 1)
+          .applyQuaternion(invParentRel)
           .normalize();
         const nodeName = node.name || String(node.userData.name ?? '');
         const isFront = /^(?:3dwheel[\s_]+front[\s_]+[lr](?:\b|_)|bone_wheel_(?:FR|FL)_rotation(?:\.\d+|\d+)?(?:\b|_)|wheel-(?:front|frount)[-_]+[lr](?:[_\b]|\b))/i.test(nodeName);
-        return { node, rest: node.quaternion.clone(), axis, steerAxis, isFront, steerWithParent: isFront && hasSteeringPivotAncestor(node), radius, spinDirection };
+        return {
+          node,
+          rest: node.quaternion.clone(),
+          axis,
+          steerAxis,
+          camberAxis,
+          sideSign,
+          isFront,
+          steerWithParent: isFront && hasSteeringPivotAncestor(node),
+          radius,
+          spinDirection,
+        };
       })
       : [];
+    for (const w of visual.modelWheels) w.node.matrixAutoUpdate = false;
     visual.modelSteeringNodes = steeringNodes.map((node) => {
+      const centerInRoot = new THREE.Box3().setFromObject(node).getCenter(new THREE.Vector3()).applyMatrix4(rootInverseMatrix);
+      const sideSign = centerInRoot.x >= 0 ? 1 : -1;
       const parentQuaternion = node.parent?.getWorldQuaternion(new THREE.Quaternion()) ?? new THREE.Quaternion();
       const parentRelativeQuaternion = rootInverseQuaternion.clone().multiply(parentQuaternion);
       const steerAxis = new THREE.Vector3(0, 1, 0)
         .applyQuaternion(parentRelativeQuaternion.invert())
         .normalize();
-      return { node, rest: node.quaternion.clone(), steerAxis };
+      node.matrixAutoUpdate = false;
+      return { node, rest: node.quaternion.clone(), steerAxis, sideSign };
     });
     if (wheelNodes.length !== 4) {
       console.warn('Araçta 4 tekerlek pivotu bulunamadı:', spec.id, wheelNodes.map((node) => node.name));
@@ -944,25 +989,28 @@ function buildModelSuspension(
 ): WheelSuspension[] {
   visual.root.updateWorldMatrix(true, true);
   const rootInverse = visual.root.matrixWorld.clone().invert();
-  const travelEntry = (node: THREE.Object3D) => {
-    // Vehicle "up" by one metre, expressed in the node's parent space.
+  const travelEntry = (node: THREE.Object3D, sideSign: number, isWheelCarrier: boolean) => {
+    // Vehicle "up" and "outward" by one metre, expressed in the node's parent space.
     const parentWorld = node.parent?.matrixWorld ?? new THREE.Matrix4();
     const rootToParent = parentWorld.clone().invert().multiply(visual.root.matrixWorld);
-    const up = new THREE.Vector3(0, 1, 0).applyMatrix3(new THREE.Matrix3().setFromMatrix4(rootToParent));
+    const rot3 = new THREE.Matrix3().setFromMatrix4(rootToParent);
+    const up = new THREE.Vector3(0, 1, 0).applyMatrix3(rot3);
+    const outward = new THREE.Vector3(sideSign, 0, 0).applyMatrix3(rot3);
     node.matrix.decompose(node.position, node.quaternion, node.scale);
-    node.matrixAutoUpdate = true;
-    return { node, rest: node.position.clone(), up };
+    node.matrixAutoUpdate = false;
+    return { node, rest: node.position.clone(), restScale: node.scale.clone(), up, outward, isWheelCarrier };
   };
   const moved = new Set<THREE.Object3D>();
   const suspension = visual.modelWheels.map((wheel) => {
     const center = getWheelLocalBounds(wheel.node).getCenter(new THREE.Vector3())
       .applyMatrix4(wheel.node.matrixWorld).applyMatrix4(rootInverse);
+    const sideSign = center.x >= 0 ? 1 : -1;
     let carrier = wheel.node;
     for (let parent = wheel.node.parent; parent; parent = parent.parent) {
       if (steeringPivots.includes(parent)) carrier = parent;
     }
     moved.add(carrier);
-    return { x: center.x, z: center.z, nodes: [travelEntry(carrier)] };
+    return { x: center.x, z: center.z, nodes: [travelEntry(carrier, sideSign, true)] };
   });
   const isUnderMovedNode = (node: THREE.Object3D): boolean => {
     for (let parent = node.parent; parent; parent = parent.parent) if (moved.has(parent)) return true;
@@ -975,16 +1023,73 @@ function buildModelSuspension(
     for (const entry of suspension) {
       if (Math.hypot(entry.x - position.x, entry.z - position.z) < Math.hypot(nearest.x - position.x, nearest.z - position.z)) nearest = entry;
     }
-    nearest.nodes.push(travelEntry(caliper));
+    const sideSign = nearest.x >= 0 ? 1 : -1;
+    nearest.nodes.push(travelEntry(caliper, sideSign, false));
   }
   return suspension;
 }
 
-/** Moves every wheel by its suspension travel (metres, + is up toward the body). */
-export function setVehicleSuspension(visual: VehicleVisual, travel: readonly number[]): void {
+/** Moves the car body by ride height / rake and keeps every wheel planted on the ground with its suspension travel, spacer offset, and rim scale. */
+export function setVehicleSuspension(visual: VehicleVisual, travel: readonly number[], stance?: StanceConfig): void {
+  const frontRideM = stance ? stance.frontRideHeightMm * 0.001 : 0;
+  const rearRideM = stance ? stance.rearRideHeightMm * 0.001 : 0;
+  const frontOffsetM = stance ? stance.frontOffsetMm * 0.001 : 0;
+  const rearOffsetM = stance ? stance.rearOffsetMm * 0.001 : 0;
+  const wheelScale = stance ? stance.wheelScale : 1;
+
+  let frontZ = 1.3;
+  let rearZ = -1.3;
+  if (visual.suspension.length > 0) {
+    let fSum = 0;
+    let fCnt = 0;
+    let rSum = 0;
+    let rCnt = 0;
+    for (let i = 0; i < visual.suspension.length; i += 1) {
+      const z = visual.suspension[i].z;
+      if (z > 0) {
+        fSum += z;
+        fCnt += 1;
+      } else {
+        rSum += z;
+        rCnt += 1;
+      }
+    }
+    if (fCnt > 0) frontZ = fSum / fCnt;
+    if (rCnt > 0) rearZ = rSum / rCnt;
+  }
+  const wheelbase = Math.max(0.5, frontZ - rearZ);
+  const sinRake = THREE.MathUtils.clamp((frontRideM - rearRideM) / wheelbase, -0.22, 0.22);
+  const rakeAngle = Math.asin(sinRake);
+  const cosRake = Math.cos(rakeAngle);
+  const bodyOffsetY = frontRideM - frontZ * sinRake;
+
+  // Move and pitch the car body (visual.root) according to front/rear ride height.
+  visual.root.position.y = bodyOffsetY;
+  visual.root.rotation.x = -rakeAngle;
+
+  // Keep the contact shadow flat on the ground plane regardless of body ride height.
+  const contactShadow = visual.root.getObjectByName('contact-shadow');
+  if (contactShadow) {
+    contactShadow.position.y = 0.012 - bodyOffsetY;
+    contactShadow.rotation.x = -Math.PI / 2 + rakeAngle;
+  }
+
+  // Counter-shift the wheel nodes by -axleBodyShift so the wheels stay planted on the ground
+  // and only move with dynamic suspension compression (travel[i]).
   for (let i = 0; i < visual.suspension.length; i += 1) {
-    for (const part of visual.suspension[i].nodes) {
-      part.node.position.copy(part.rest).addScaledVector(part.up, travel[i] ?? 0);
+    const susp = visual.suspension[i];
+    const isFront = susp.z > 0;
+    const axleBodyShift = bodyOffsetY + susp.z * sinRake;
+    const verticalShift = ((travel[i] ?? 0) - axleBodyShift) / cosRake;
+    const lateralShift = isFront ? frontOffsetM : rearOffsetM;
+    for (const part of susp.nodes) {
+      part.node.position
+        .copy(part.rest)
+        .addScaledVector(part.up, verticalShift)
+        .addScaledVector(part.outward, lateralShift);
+      if (part.isWheelCarrier) {
+        part.node.scale.copy(part.restScale).multiplyScalar(wheelScale);
+      }
       part.node.updateMatrix();
     }
   }
@@ -1025,27 +1130,55 @@ export function disposeVehicleVisual(visual: VehicleVisual): void {
   visual.root.clear();
 }
 
-export function setVehicleWheelSpin(visual: VehicleVisual, distance: number, steeringAngle = 0, rearDistance = distance): void {
+const DEG_TO_RAD = Math.PI / 180;
+
+export function setVehicleWheelSpin(
+  visual: VehicleVisual,
+  distance: number,
+  steeringAngle = 0,
+  rearDistance = distance,
+  stance?: StanceConfig,
+): void {
+  const frontCamberRad = stance ? stance.frontCamberDeg * DEG_TO_RAD : 0;
+  const rearCamberRad = stance ? stance.rearCamberDeg * DEG_TO_RAD : 0;
+  const frontToeRad = stance ? stance.frontToeDeg * DEG_TO_RAD : 0;
+  const rearToeRad = stance ? stance.rearToeDeg * DEG_TO_RAD : 0;
+
   // Procedural wheels use +X as their axle and the car moves along +Z.
-  for (const wheel of visual.steerWheels) wheel.rotation.y = steeringAngle;
+  for (let i = 0; i < visual.steerWheels.length; i += 1) {
+    const sideSign = i === 0 ? -1 : 1;
+    visual.steerWheels[i].rotation.y = steeringAngle - sideSign * frontToeRad;
+  }
   for (let i = 0; i < visual.wheels.length; i += 1) {
-    const wheelDistance = i >= 2 ? rearDistance : distance;
+    const isFront = i < 2;
+    const sideSign = (i & 1) === 0 ? -1 : 1;
+    const wheelDistance = isFront ? distance : rearDistance;
     visual.wheels[i].rotation.x = -wheelDistance / visual.wheelRadius;
+    visual.wheels[i].rotation.z = -sideSign * (isFront ? frontCamberRad : rearCamberRad);
   }
   for (const wheel of visual.modelWheels) {
     const wheelDistance = wheel.isFront ? distance : rearDistance;
     const angle = wheelDistance / wheel.radius * wheel.spinDirection;
+    const camberRad = wheel.isFront ? frontCamberRad : rearCamberRad;
+    const toeRad = wheel.isFront ? frontToeRad : rearToeRad;
     visual.spinQuaternion.setFromAxisAngle(wheel.axis, angle);
     wheel.node.quaternion.copy(wheel.rest);
     if (wheel.isFront && !wheel.steerWithParent) {
-      visual.steerQuaternion.setFromAxisAngle(wheel.steerAxis, steeringAngle);
+      visual.steerQuaternion.setFromAxisAngle(wheel.steerAxis, steeringAngle - wheel.sideSign * toeRad);
       wheel.node.quaternion.premultiply(visual.steerQuaternion);
+    } else if (!wheel.isFront && Math.abs(toeRad) > 1e-4) {
+      visual.steerQuaternion.setFromAxisAngle(wheel.steerAxis, -wheel.sideSign * toeRad);
+      wheel.node.quaternion.premultiply(visual.steerQuaternion);
+    }
+    if (Math.abs(camberRad) > 1e-4) {
+      visual.camberQuaternion.setFromAxisAngle(wheel.camberAxis, -wheel.sideSign * camberRad);
+      wheel.node.quaternion.premultiply(visual.camberQuaternion);
     }
     wheel.node.quaternion.multiply(visual.spinQuaternion);
     wheel.node.updateMatrix();
   }
   for (const part of visual.modelSteeringNodes) {
-    visual.steerQuaternion.setFromAxisAngle(part.steerAxis, steeringAngle);
+    visual.steerQuaternion.setFromAxisAngle(part.steerAxis, steeringAngle - part.sideSign * frontToeRad);
     part.node.quaternion.copy(part.rest).premultiply(visual.steerQuaternion);
     part.node.updateMatrix();
   }

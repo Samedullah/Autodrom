@@ -1,6 +1,6 @@
 export type CarClass = 'EKONOMI' | 'SEHIR' | 'SPORT' | 'PERFORMANS' | 'SUPER';
 export type BodyStyle = 'hatch' | 'sedan' | 'coupe' | 'roadster' | 'sport' | 'super';
-export type MapId = 'city-highway' | 'spa';
+export type MapId = 'city-highway' | 'spa' | 'nurburgring' | 'bushido-peak';
 
 export interface RealVehicleSpecs {
   modelYear?: number;
@@ -541,4 +541,9 @@ export const CLASS_LABELS: Record<CarClass, string> = {
   EKONOMI: 'EKONOMİ', SEHIR: 'ŞEHİR', SPORT: 'SPORT', PERFORMANS: 'PERFORMANS', SUPER: 'SÜPER',
 };
 
-export const MAP_LABELS: Record<MapId, string> = { 'city-highway': 'Şehir + Otoban', spa: 'Spa-Francorchamps' };
+export const MAP_LABELS: Record<MapId, string> = {
+  'city-highway': 'Şehir + Otoban',
+  spa: 'Spa-Francorchamps',
+  nurburgring: 'Nürburgring GP',
+  'bushido-peak': 'Bushido Peak',
+};

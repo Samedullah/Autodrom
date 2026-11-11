@@ -74,22 +74,12 @@ button { color: inherit; }
   width: 35px; height: 35px; border: 1px solid var(--line); border-radius: 9px;
   color: #d9e1d8; background: rgba(17, 25, 21, .52); cursor: pointer; transition: .2s ease;
 }
-.drift-mode-toggle {
-  min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
-  border: 1px solid rgba(224, 142, 97, .3); border-radius: 9px; color: #e3c1a3;
-  background: rgba(56, 39, 28, .55); cursor: pointer; transition: .18s ease; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
-}
-.drift-mode-toggle > span { font: 500 8px var(--mono); letter-spacing: .08em; white-space: nowrap; }
-.drift-mode-toggle > b { color: #a9a59a; font: 600 8px var(--mono); letter-spacing: .06em; }
-.drift-mode-toggle.active { border-color: rgba(242, 157, 94, .7); color: #ffe0bd; background: rgba(137, 70, 39, .72); box-shadow: 0 0 16px rgba(238, 127, 69, .17); }
-.drift-mode-toggle.active > b { color: #ffd09b; }
 .multiplayer-toggle {
   min-height: 34px; padding: 0 10px; border: 1px solid rgba(142, 213, 171, .28); border-radius: 8px;
   color: #bce7c6; background: rgba(48, 94, 63, .3); cursor: pointer;
   font: 600 8px var(--mono); letter-spacing: .1em; touch-action: manipulation;
 }
 .multiplayer-toggle:hover { border-color: rgba(142, 213, 171, .7); background: rgba(48, 94, 63, .56); }
-.hud-layer.has-modal .drift-mode-toggle { display: none; }
 /* TCS warning light in the tachometer's free right side. */
 .tcs-lamp {
   position: absolute; left: 88%; top: 50%; width: 15%; height: auto; transform: translate(-50%, -50%);
@@ -424,6 +414,14 @@ button { color: inherit; }
 .map-card.spa .map-art i { width: 62%; height: 54px; top: 34px; left: 12%; border-radius: 48% 30% 55% 22%; background: transparent; border: 10px solid #343c38; transform: rotate(-14deg); }
 .map-card.spa .map-art b { width: 26%; height: 30px; top: 22px; left: 62%; border-radius: 40% 60% 20% 50%; background: transparent; border: 9px solid #343c38; transform: rotate(22deg); }
 .map-card.spa .map-art em { width: 22px; height: 5px; top: 30px; left: 30%; background: #e8e4cf; transform: rotate(-14deg); }
+.map-card.nurburgring .map-art { background: linear-gradient(155deg, #334e43, #58755d 52%, #879476); }
+.map-card.nurburgring .map-art i { width: 66%; height: 58px; top: 32px; left: 14%; border-radius: 36% 62% 40% 54%; background: transparent; border: 11px solid #313835; transform: rotate(-18deg); }
+.map-card.nurburgring .map-art b { width: 28%; height: 34px; top: 52px; left: 54%; border-radius: 55% 35% 60% 40%; background: transparent; border: 9px solid #313835; transform: rotate(15deg); }
+.map-card.nurburgring .map-art em { width: 28px; height: 5px; top: 34px; left: 26%; background: #e6dec3; transform: rotate(-28deg); }
+.map-card.bushido-peak .map-art { background: linear-gradient(150deg, #3c4654, #6c6c61 52%, #9d8b74); }
+.map-card.bushido-peak .map-art i { width: 74%; height: 46px; top: 42px; left: 8%; border-radius: 52% 24% 48% 28%; background: transparent; border: 10px solid #2f3538; transform: rotate(-10deg); }
+.map-card.bushido-peak .map-art b { width: 42%; height: 38px; top: 20px; left: 46%; border-radius: 28% 58% 32% 54%; background: transparent; border: 9px solid #2f3538; transform: rotate(24deg); }
+.map-card.bushido-peak .map-art em { width: 24px; height: 5px; top: 74px; left: 22%; background: #edd9b8; transform: rotate(-12deg); }
 .map-tag { position: absolute; top: 10px; right: 10px; padding: 5px 7px; border: 1px solid rgba(234, 240, 222, .25); border-radius: 5px; color: #e4ebd9; background: rgba(25, 35, 27, .58); font: 500 7px var(--mono); letter-spacing: .1em; }
 .map-card-copy b { display: block; font: 600 14px var(--display); }
 .map-card-copy small { display: block; max-width: 310px; margin-top: 5px; color: #9ba99b; font-size: 9px; line-height: 1.5; }
@@ -513,9 +511,6 @@ button { color: inherit; }
   .cash-label { font-size: 5px; }
   .map-pill { display: none; }
   .multiplayer-toggle { width: 50px; min-height: 34px; padding: 0 5px; font-size: 6px; }
-  .drift-mode-toggle { width: 44px; min-width: 44px; min-height: 34px; justify-content: center; gap: 0; padding: 0; }
-  .drift-mode-toggle > span { font-size: 6px; letter-spacing: 0; }
-  .drift-mode-toggle > b { display: none; }
   .topbar { height: calc(56px + env(safe-area-inset-top)); }
   .touch-steering { left: calc(10px + env(safe-area-inset-left)); gap: 7px; }
   .steer-button { width: 53px; height: 61px; }
@@ -863,3 +858,51 @@ button { color: inherit; }
 .debug-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
 .debug-presets button:hover { border-color: var(--mint); }
 .debug-stats { margin: 0; padding: 8px; border-radius: 7px; background: rgba(0, 0, 0, .35); color: #b6c6ba; font: inherit; line-height: 1.55; white-space: pre; }
+
+/* Tire Physics Debug Panel (L). */
+.tire-debug-panel {
+  position: fixed; top: 92px; left: 18px; z-index: 41; width: 356px; max-height: calc(100vh - 110px); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+  border: 1px solid rgba(184, 237, 201, .28); border-radius: 12px; color: #dce7de;
+  background: rgba(10, 16, 13, .90); backdrop-filter: blur(10px); font: 500 10px var(--mono); letter-spacing: .03em;
+}
+.tire-debug-panel[hidden] { display: none; }
+.tire-debug-panel header { display: flex; justify-content: space-between; align-items: baseline; }
+.tire-debug-panel header b { color: var(--mint); letter-spacing: .14em; }
+.tire-debug-panel header span { color: #7f8f84; font-size: 9px; }
+.tire-debug-section-title { color: #90a897; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; margin-top: 2px; }
+.tire-profile-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.tire-profile-grid button, .tire-reset-btn, .tire-debug-inline select {
+  padding: 5px 6px; border: 1px solid rgba(184, 237, 201, .24); border-radius: 6px; color: #dce7de;
+  background: rgba(36, 52, 42, .72); font: inherit; cursor: pointer;
+}
+.tire-profile-grid button:hover, .tire-reset-btn:hover { border-color: var(--mint); }
+.tire-profile-grid button.is-active { background: rgba(123, 227, 162, .22); border-color: var(--mint); color: #fff; font-weight: 700; }
+.tire-debug-inline { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.tire-debug-inline label { display: flex; align-items: center; gap: 6px; flex: 1; }
+.tire-debug-inline select { flex: 1; }
+.tire-sliders { display: flex; flex-direction: column; gap: 5px; padding: 6px 8px; border-radius: 8px; background: rgba(0, 0, 0, .28); }
+.tire-debug-row { display: flex; flex-direction: column; gap: 2px; }
+.tire-debug-row > span { display: flex; justify-content: space-between; }
+.tire-debug-row b { color: #fff; }
+.tire-debug-row input[type='range'] { width: 100%; margin: 0; accent-color: #b8edc9; height: 12px; }
+.tire-telemetry-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.tire-card { padding: 7px 8px; border-radius: 8px; background: rgba(0, 0, 0, .38); border: 1px solid rgba(184, 237, 201, .14); display: flex; flex-direction: column; gap: 5px; }
+.tire-card-head { display: flex; justify-content: space-between; align-items: center; font-size: 9px; }
+.tire-card-head b { color: #fff; }
+.tire-contact { padding: 1px 5px; border-radius: 4px; background: rgba(123, 227, 162, .2); color: #7be3a2; font-size: 8px; font-weight: 700; }
+.tire-contact.is-air { background: rgba(255, 107, 91, .24); color: #ff7e70; }
+.tire-grip-bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .1); overflow: hidden; }
+.tire-grip-bar i { display: block; height: 100%; width: 0%; background: #7be3a2; transition: width 60ms linear; }
+.tire-card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 6px; font-size: 9px; color: #9fb3a5; }
+.tire-card-grid b { color: #eef5f0; font-weight: 600; }
+.tire-card-grid .tire-wide { grid-column: 1 / -1; }
+
+/* Stance & Suspension Modification Panel (I). */
+.stance-panel {
+  position: fixed; top: 92px; left: auto; right: 18px; z-index: 42; width: 356px;
+}
+.stance-panel[hidden] { display: none; }
+.stance-preset-grid { grid-template-columns: repeat(2, 1fr); }
+.stance-footer { display: flex; justify-content: flex-end; margin-top: 2px; }
+.stance-footer .tire-reset-btn { width: 100%; padding: 6px 8px; font-weight: 600; }

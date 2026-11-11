@@ -5,6 +5,8 @@ import { isValidMap, saveGame, loadSave, loadSettings, saveSettings, type SaveDa
 import { GameInterface, type Screen, type UiAction, type UiSnapshot } from './ui';
 import { MultiplayerClient } from './multiplayer';
 import { DebugPanel } from './debugPanel';
+import { TireDebugPanel } from './tireDebugPanel';
+import { StancePanel } from './stancePanel';
 
 const gameHost = document.querySelector<HTMLElement>('#game');
 const uiHost = document.querySelector<HTMLElement>('#interface');
@@ -60,9 +62,14 @@ const engine = new DriveEngine(gameHost, activeVehicle, currentMap, settings, {
   onDevCode: () => toggleDevCodePanel(),
   onToggleTcs: () => ui?.setTcsEnabled(engine.toggleTcs()),
   onDebugPanel: () => toggleDebugPanel(),
+  onTireDebugPanel: () => toggleTireDebugPanel(),
+  onStancePanel: () => toggleStancePanel(),
   onTelemetry: (telemetry) => {
     lastTelemetry = telemetry;
     ui?.updateTelemetry(telemetry);
+    if (tireDebugPanel.open) {
+      tireDebugPanel.updateTelemetry(engine.getTireDebugState());
+    }
   },
   onEscape: () => {
     if (ui?.isDevCodeOpen()) {
@@ -146,6 +153,55 @@ function toggleDebugPanel(): void {
   debugTimer = window.setInterval(refreshDebugPanel, 250);
 }
 
+// Tire Physics Debug Panel (L): live compound profiles, per-axle/wheel tuning, 4-wheel telemetry.
+const tireDebugPanel = new TireDebugPanel({
+  onSelectProfile: (profile) => {
+    engine.setTireProfile(profile);
+    tireDebugPanel.syncControls(engine.getTireDebugState());
+  },
+  onSelectTarget: (target) => {
+    engine.setTireEditTarget(target);
+    tireDebugPanel.syncControls(engine.getTireDebugState());
+  },
+  onChangeParam: (changes) => {
+    engine.updateTireTuning(changes);
+  },
+  onReset: () => {
+    engine.resetTireTuning();
+    tireDebugPanel.syncControls(engine.getTireDebugState());
+  },
+});
+
+function toggleTireDebugPanel(): void {
+  if (!tireDebugPanel.toggle()) return;
+  const state = engine.getTireDebugState();
+  tireDebugPanel.syncControls(state);
+  tireDebugPanel.updateTelemetry(state);
+}
+
+// Stance & Suspension Modification Panel (I): ride height, camber, offset, wheel scale, toe, springs/ARB.
+const stancePanel = new StancePanel({
+  onSelectPreset: (preset) => {
+    engine.setStancePreset(preset);
+    const state = engine.getStanceState();
+    stancePanel.syncControls(state.config, state.preset);
+  },
+  onChange: (changes) => {
+    engine.updateStance(changes);
+  },
+  onReset: () => {
+    engine.resetStance();
+    const state = engine.getStanceState();
+    stancePanel.syncControls(state.config, state.preset);
+  },
+});
+
+function toggleStancePanel(): void {
+  if (!stancePanel.toggle()) return;
+  const state = engine.getStanceState();
+  stancePanel.syncControls(state.config, state.preset);
+}
+
 function toggleDevCodePanel(): void {
   if (!ui) return;
   if (ui.isDevCodeOpen()) {
@@ -199,10 +255,6 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
   }
   if (action === 'copy-room') {
     if (multiplayer.roomCode) void navigator.clipboard?.writeText(multiplayer.roomCode);
-    return;
-  }
-  if (action === 'toggle-drift') {
-    ui?.setDriftModeEnabled(engine.toggleDriftMode());
     return;
   }
   if (action === 'toggle-tcs') {

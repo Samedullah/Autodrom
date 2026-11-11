@@ -14,24 +14,53 @@ const vertexShader = /* glsl */ `
   }
 `;
 
+// Samples are tone-mapped one by one and then averaged, so the blur works on
+// the colours the player actually sees. Averaging the raw HDR scene instead
+// lets a few very bright texels (lit lamps, sun glints, the sky) dominate
+// every smear: red lamp light bled over the body and bright sky turned the
+// whole image milky. Samples that land on the car itself are left out, so
+// the car never smears onto the road around it.
 const fragmentShader = /* glsl */ `
   uniform sampler2D tDiffuse;
   uniform float strength;
   uniform vec2 focus;   // vanishing point the blur streaks away from
   uniform float aspect;
   varying vec2 vUv;
+  #ifndef TONE_MAPPING
+  vec3 toneMapping(vec3 color) { return color; }
+  #endif
+  // 0 on the car (just below screen centre), 1 towards the edges.
+  float awayFromCar(vec2 uv) {
+    vec2 fromCar = (uv - vec2(0.5, 0.42)) * vec2(aspect, 1.0);
+    return smoothstep(0.16, 0.62, length(fromCar));
+  }
   void main() {
-    vec2 toFocus = vUv - focus;
-    // Keep the car (just below screen centre) crisp; blur grows towards the edges.
-    vec2 fromCar = (vUv - vec2(0.5, 0.42)) * vec2(aspect, 1.0);
-    float mask = smoothstep(0.16, 0.62, length(fromCar));
-    vec2 stepUv = toFocus * strength * mask / float(${SAMPLES});
-    vec4 color = vec4(0.0);
-    for (int i = 0; i < ${SAMPLES}; i++) {
-      color += texture2D(tDiffuse, vUv - stepUv * float(i));
+    float centerMask = awayFromCar(vUv);
+    vec3 baseHdr = texture2D(tDiffuse, vUv).rgb;
+    if (centerMask < 0.004) {
+      gl_FragColor = vec4(toneMapping(baseHdr), 1.0);
+      #include <colorspace_fragment>
+      return;
     }
-    gl_FragColor = color / float(${SAMPLES});
-    #include <tonemapping_fragment>
+    vec2 stepUv = (vUv - focus) * strength * centerMask / float(${SAMPLES});
+    float baseLuma = dot(baseHdr, vec3(0.2126, 0.7152, 0.0722));
+    float baseKaris = 1.0 / (1.0 + baseLuma);
+    vec3 hdrAccum = baseHdr * baseKaris;
+    float weightAccum = baseKaris;
+    for (int i = 1; i < ${SAMPLES}; i++) {
+      vec2 uv = vUv - stepUv * float(i);
+      float w = awayFromCar(uv);
+      vec3 sampleHdr = texture2D(tDiffuse, uv).rgb;
+      float luma = dot(sampleHdr, vec3(0.2126, 0.7152, 0.0722));
+      float kw = w / (1.0 + luma);
+      hdrAccum += sampleHdr * kw;
+      weightAccum += kw;
+    }
+    vec3 resolvedHdr = hdrAccum / max(weightAccum, 1e-4);
+    // Inverse Karis restore so overall scene brightness matches single-sample toneMapping.
+    float avgLuma = dot(resolvedHdr, vec3(0.2126, 0.7152, 0.0722));
+    vec3 restoredHdr = resolvedHdr / max(1.0 - min(avgLuma, 0.85) * 0.35, 0.25);
+    gl_FragColor = vec4(toneMapping(restoredHdr), 1.0);
     #include <colorspace_fragment>
   }
 `;
@@ -45,7 +74,7 @@ export class MotionBlur {
   private readonly size = new THREE.Vector2();
 
   constructor(private readonly renderer: THREE.WebGLRenderer, samples: number) {
-    // Half float keeps the scene's HDR range; tone mapping happens in the blur pass.
+    // Half float keeps the scene's HDR range; each sample is tone-mapped in the blur pass.
     this.target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples });
     this.material = new THREE.ShaderMaterial({
       uniforms: {

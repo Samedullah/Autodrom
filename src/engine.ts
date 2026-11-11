@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ECONOMY, MAP_LABELS, VEHICLES, VEHICLE_SCALE, type MapId, type VehicleSpec } from './data';
+import { ECONOMY, MAP_LABELS, VEHICLES, type MapId, type VehicleSpec } from './data';
 import { IncomeClock } from './economy';
 import type { GameSettings } from './save';
 import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleMaterialQuality, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
@@ -7,10 +7,30 @@ import { VehicleAudio } from './vehicleAudio';
 import { TireSmoke } from './tireSmoke';
 import { MotionBlur } from './motionBlur';
 import { LampBloom } from './lampBloom';
+import { CameraMotion } from './cameraMotion';
 import { Atmosphere, DAYLIGHT } from './atmosphere';
 import { Environment, applyWetness, type EnvironmentState } from './environment';
-import { Drivetrain, GEAR_SPEED, ROLLING_RESISTANCE, rpmAtSpeed, type Gear } from './drivetrain';
+import {
+  Chassis,
+  type ChassisBody,
+  type ChassisOutput,
+  type TireDebugState,
+  type TireEditTarget,
+  type TireProfileId,
+  type TireTuningParams,
+} from './chassis';
+import {
+  Drivetrain,
+  GEAR_SPEED,
+  ROLLING_RESISTANCE,
+  aeroDownforceG,
+  aeroProfileOf,
+  rpmAtSpeed,
+  type AeroProfile,
+  type Gear,
+} from './drivetrain';
 import type { LocalPlayerState, MultiplayerClient, MultiplayerPlayer } from './multiplayer';
+import { STANCE_PRESETS, cloneStanceConfig, type StanceConfig, type StancePresetId } from './stancePanel';
 import { buildWorld, groundHeightAt, type WorldData } from './world';
 import type { WallGrid } from './terrain';
 
@@ -31,6 +51,8 @@ export interface EngineCallbacks {
   onMissionFailed: () => void;
   onDevCode: () => void;
   onDebugPanel: () => void;
+  onTireDebugPanel?: () => void;
+  onStancePanel?: () => void;
   onToggleTcs: () => void;
   onTelemetry: (telemetry: Telemetry) => void;
   onEscape: () => void;
@@ -52,23 +74,6 @@ interface RemoteVehicle {
 }
 
 
-// --- Drift ayarları: sayıları değiştirerek hissi buradan ayarlayabilirsin ---
-const DRIFT_TUNING = {
-  baseGrip: 2.0,          // drift modunda temel yanal tutuş (eski: 2.7). Düşük = daha çok kayar
-  minGrip: 0.75,          // en düşük tutuş (eski: 1.15)
-  gasGripLoss: 1.0,       // gaz basılıyken kaybedilen tutuş (eski: 0.55)
-  slipGripLoss: 0.55,     // kayma açısı arttıkça tutuşun azalma oranı (0-1)
-  slipGripSensitivity: 2.2, // kayma açısına tepki hızı
-  yawAccelLow: 3.4,       // düşük hızda dönüş ivmesi (eski: 4.4)
-  yawAccelHigh: 2.4,      // yüksek hızda dönüş ivmesi (eski: 3.2)
-  yawUsesTotalSpeed: 0.9, // 0-1: dönüş hızı toplam hıza ne kadar bağlansın (açı sınırını kaldırır)
-  selfAlignCut: 0.7,      // aracı düz yöne çeken toparlanmayı kısma oranı (0-1)
-  slideDriveBoost: 0.4,   // kayarken kaybolan yanal hızın ileri hıza dönen kısmı (gaz hissi)
-  slideDragGas: 0.2,      // gaz basılıyken kayma sürtünmesi çarpanı
-  slideDrag: 0.05,        // kayma sürtünmesi
-  brakeLateralDecay: 1.6, // frende yanal hızın sönme hızı
-  counterSteerMax: 0.62,  // karşı direksiyon görselinde en fazla tekerlek açısı (rad)
-};
 const DOWNSHIFT_SAFE_SPEED_FACTOR = 0.9;
 const AUTO_UPSHIFT_RPM = 6700;
 const AUTO_DOWNSHIFT_RPM = 2500;
@@ -79,17 +84,9 @@ const MODEL_LOAD_TIMEOUT_MS = 30000;
 const HEADLIGHT_INTENSITY = 1800;
 // Seconds between re-bakes of the sky reflections while the light changes.
 const ENVIRONMENT_BAKE_INTERVAL = 1.2;
-// Steering lock halves at about this speed (m/s, ~160 km/h) and keeps falling.
-const STEERING_FADE_SPEED = 45;
-// Base cornering grip in g on top of which the car's handling adds up to 0.2 g.
-// Above real road grip (~1.1 g) on purpose: tight enough to stop darting at
-// speed, loose enough for city corners to feel quick.
-const GRIP_LATERAL_G = 1.6;
 // Engine braking in 1st gear (m/s²), falling off in higher gears. Rolling and
 // air resistance come from the drivetrain module (air drag is per car).
 const ENGINE_BRAKING = 1.6;
-// Rear axle behind the car's centre, as a share of its length (as the smoke and skid code place it).
-const REAR_AXLE_SHARE = 0.31;
 // Distance between wall checks along a frame's move (m); walls are 1 m cells.
 const WALL_CHECK_STEP = 0.5;
 // Chase camera framing, set on the 911 GT3 RS (5.48 m long, 1.58 m tall in
@@ -215,18 +212,19 @@ export class DriveEngine {
   private yaw = Math.PI / 2;
   private yawRate = 0;
   private frontWheelAngle = 0;
-  private previousSteerInput = 0;
-  private flickLoad = 0;
   private cameraOrbit = 0;
   private cameraElevation = CAMERA_ELEVATION;
   private cameraHeading = 0;
   private cameraHeight = 0;
   private cameraZoom = 1;
+  private readonly cameraMotion = new CameraMotion();
+  private cameraGear: Gear = 1;
+  // Body-frame acceleration measured by the suspension each frame (m/s², clamped).
+  private bodyAccelLong = 0;
+  private bodyAccelLat = 0;
   private drivingEnabled = false;
-  private driftModeEnabled = false;
   private tcsEnabled = true;
   private tcsActive = false;
-  private driftModeBlend = 0;
   private handbrakeGripBlend = 0;
   private cameraPointerId: number | null = null;
   private cameraPointerX = 0;
@@ -241,6 +239,10 @@ export class DriveEngine {
   private wheelTravel = 0;
   private rearWheelTravel = 0;
   private readonly drivetrain: Drivetrain;
+  private readonly chassis: Chassis;
+  private readonly chassisBody: ChassisBody;
+  // Last tyre state, fed back to the drivetrain's friction circle next frame.
+  private chassisOutput: ChassisOutput = { frontSlip: 0, rearSlip: 0, frontSideUse: 0, rearSideUse: 0, frontSlide: 0, rearSlide: 0 };
   private rearSpin = 0;
   private frontSpin = 0;
   private burnoutActive = false;
@@ -278,6 +280,20 @@ export class DriveEngine {
   private airborne = false;
   private readonly wheelGround = [0, 0, 0, 0];
   private readonly suspensionTravel = [0, 0, 0, 0];
+  private readonly groundRate = [0, 0, 0, 0];
+  private readonly wheelSuspensionLoads = [0, 0, 0, 0];
+  private readonly wheelStaticLoad = [0, 0, 0, 0];
+  private readonly wheelToChassisIdx = [0, 1, 2, 3];
+  private suspCachedWheels: unknown = null;
+  private suspSpringRate = 0;
+  private suspDamperRate = 0;
+  private suspPitchInertia = 1;
+  private suspRollInertia = 1;
+  private suspAntiRollStiffness = 0;
+  private aeroProfile: AeroProfile;
+  private stancePreset: StancePresetId | null = 'stock';
+  private readonly stance: StanceConfig = cloneStanceConfig(STANCE_PRESETS.stock.config);
+  private readonly telemetryState: Telemetry = { speedKmh: 0, gear: 1, rpm: 850, drifting: false, tcsActive: false };
   private readonly previousVelocity = new THREE.Vector3();
   private readonly groundSlope = new THREE.Vector2();
   private readonly shadowRight = new THREE.Vector3();
@@ -297,7 +313,10 @@ export class DriveEngine {
     callbacks: EngineCallbacks,
   ) {
     this.vehicle = vehicle;
+    this.aeroProfile = aeroProfileOf(vehicle);
     this.drivetrain = new Drivetrain(vehicle);
+    this.chassis = new Chassis(vehicle);
+    this.chassisBody = { velocity: this.velocity, yaw: this.yaw, yawRate: 0 };
     setVehicleMaterialQuality(settings.quality);
     this.mapId = mapId;
     this.settings = { ...settings };
@@ -346,7 +365,10 @@ export class DriveEngine {
     this.scene.add(this.worldData.root);
     this.visual = createVehicleVisual(vehicle);
     this.carRoot.add(this.visual.root);
-    this.initialModel = installGeneratedModel(this.visual, vehicle);
+    this.initialModel = installGeneratedModel(this.visual, vehicle).then((ok) => {
+      this.applyStanceVisuals();
+      return ok;
+    });
     this.resetCar();
     // MSAA is fixed when the WebGL context is created, so a quality change
     // toggles it only after the next page load.
@@ -400,6 +422,16 @@ export class DriveEngine {
     if (key === 'p') {
       event.preventDefault();
       if (!event.repeat) this.callbacks.onDebugPanel();
+      return;
+    }
+    if (key === 'l') {
+      event.preventDefault();
+      if (!event.repeat) this.callbacks.onTireDebugPanel?.();
+      return;
+    }
+    if (key === 'ı' || key === 'i' || key === 'i̇' || event.code === 'KeyI') {
+      event.preventDefault();
+      if (!event.repeat) this.callbacks.onStancePanel?.();
       return;
     }
     if (key === 'm') {
@@ -522,13 +554,6 @@ export class DriveEngine {
     else this.touchKeys.delete(key[control]);
   }
 
-  toggleDriftMode(): boolean {
-    this.driftModeEnabled = !this.driftModeEnabled;
-    return this.driftModeEnabled;
-  }
-
-  isDriftModeEnabled(): boolean { return this.driftModeEnabled; }
-
   toggleTcs(): boolean {
     this.tcsEnabled = !this.tcsEnabled;
     return this.tcsEnabled;
@@ -608,11 +633,13 @@ export class DriveEngine {
 
   setVehicle(vehicle: VehicleSpec): void {
     this.vehicle = vehicle;
+    this.aeroProfile = aeroProfileOf(vehicle);
     this.gear = 1;
     this.velocity.set(0, 0, 0);
     this.wheelTravel = 0;
     this.rearWheelTravel = 0;
     this.drivetrain.setVehicle(vehicle);
+    this.chassis.setVehicle(vehicle);
     this.skidModelPositionsReady = false;
     this.incomeClock.reset();
     this.clearSkids();
@@ -622,7 +649,8 @@ export class DriveEngine {
     this.sceneNeedsRender = true;
     this.carRoot.add(this.visual.root);
     this.resetCar();
-    void installGeneratedModel(this.visual, vehicle);
+    this.applyStanceVisuals();
+    void installGeneratedModel(this.visual, vehicle).finally(() => this.applyStanceVisuals());
   }
 
   /** Switches map; resolves once a map that loads in the background is in place. */
@@ -693,7 +721,7 @@ export class DriveEngine {
     // Compile hidden parts too (lit lamps, brake glow), so the first brake does not hitch.
     setVehicleLights(this.visual, true, true);
     await this.renderer.compileAsync(this.scene, this.camera);
-    this.lampBloom.render(this.scene, this.camera);
+    this.lampBloom.render(this.scene, this.camera, this.carRoot);
     setVehicleLights(this.visual, false, false);
     // Upload every texture now; otherwise each one uploads the first time it
     // comes into view, and the drive stutters as new parts of the map appear.
@@ -745,6 +773,66 @@ export class DriveEngine {
   getMapId(): MapId { return this.mapId; }
   getVehicle(): VehicleSpec { return this.vehicle; }
 
+  getTireDebugState(): TireDebugState {
+    return this.chassis.getDebugState();
+  }
+
+  setTireProfile(profile: TireProfileId): void {
+    this.chassis.applyProfile(profile);
+  }
+
+  setTireEditTarget(target: TireEditTarget): void {
+    this.chassis.setEditTarget(target);
+  }
+
+  updateTireTuning(changes: Partial<TireTuningParams>): void {
+    this.chassis.updateTuning(changes);
+  }
+
+  resetTireTuning(): void {
+    this.chassis.resetTuningToDefault();
+  }
+
+  getStanceState(): { preset: StancePresetId | null; config: StanceConfig } {
+    return { preset: this.stancePreset, config: this.stance };
+  }
+
+  setStancePreset(preset: StancePresetId): void {
+    this.stancePreset = preset;
+    Object.assign(this.stance, STANCE_PRESETS[preset].config);
+    this.chassis.setStance(this.stance);
+    this.applyStanceVisuals();
+  }
+
+  updateStance(changes: Partial<StanceConfig>): void {
+    this.stancePreset = null;
+    if (changes.frontRideHeightMm !== undefined) this.stance.frontRideHeightMm = THREE.MathUtils.clamp(changes.frontRideHeightMm, -80, 40);
+    if (changes.rearRideHeightMm !== undefined) this.stance.rearRideHeightMm = THREE.MathUtils.clamp(changes.rearRideHeightMm, -80, 40);
+    if (changes.frontOffsetMm !== undefined) this.stance.frontOffsetMm = THREE.MathUtils.clamp(changes.frontOffsetMm, -20, 60);
+    if (changes.rearOffsetMm !== undefined) this.stance.rearOffsetMm = THREE.MathUtils.clamp(changes.rearOffsetMm, -20, 60);
+    if (changes.wheelScale !== undefined) this.stance.wheelScale = THREE.MathUtils.clamp(changes.wheelScale, 0.88, 1.16);
+    if (changes.frontCamberDeg !== undefined) this.stance.frontCamberDeg = THREE.MathUtils.clamp(changes.frontCamberDeg, -12, 2);
+    if (changes.rearCamberDeg !== undefined) this.stance.rearCamberDeg = THREE.MathUtils.clamp(changes.rearCamberDeg, -12, 2);
+    if (changes.frontToeDeg !== undefined) this.stance.frontToeDeg = THREE.MathUtils.clamp(changes.frontToeDeg, -1.5, 1.5);
+    if (changes.rearToeDeg !== undefined) this.stance.rearToeDeg = THREE.MathUtils.clamp(changes.rearToeDeg, -1.5, 1.5);
+    if (changes.steeringLockBonusDeg !== undefined) this.stance.steeringLockBonusDeg = THREE.MathUtils.clamp(changes.steeringLockBonusDeg, 0, 15);
+    if (changes.springStiffnessMult !== undefined) this.stance.springStiffnessMult = THREE.MathUtils.clamp(changes.springStiffnessMult, 0.5, 2.5);
+    if (changes.damperStiffnessMult !== undefined) this.stance.damperStiffnessMult = THREE.MathUtils.clamp(changes.damperStiffnessMult, 0.4, 2.5);
+    if (changes.antiRollBarMult !== undefined) this.stance.antiRollBarMult = THREE.MathUtils.clamp(changes.antiRollBarMult, 0.3, 2.5);
+    this.chassis.setStance(this.stance);
+    this.applyStanceVisuals();
+  }
+
+  resetStance(): void {
+    this.setStancePreset('stock');
+  }
+
+  private applyStanceVisuals(): void {
+    setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel, this.stance);
+    setVehicleSuspension(this.visual, this.suspensionTravel, this.stance);
+    this.sceneNeedsRender = true;
+  }
+
   resetCar(): void {
     this.sceneNeedsRender = true;
     this.carRoot.position.copy(this.worldData.spawn);
@@ -752,8 +840,9 @@ export class DriveEngine {
     this.yawRate = 0;
     this.frontWheelAngle = 0;
     this.drivetrain.reset();
-    this.previousSteerInput = 0;
-    this.flickLoad = 0;
+    this.chassis.reset();
+    this.handbrakeGripBlend = 0;
+    this.driftValue = 0;
     this.velocity.set(0, 0, 0);
     this.previousCarPosition.copy(this.worldData.spawn);
     this.speedGateCooldowns.clear();
@@ -772,6 +861,8 @@ export class DriveEngine {
     this.wheelGround.fill(spawnGround);
     this.suspensionTravel.fill(0);
     this.previousVelocity.set(0, 0, 0);
+    this.bodyAccelLong = 0;
+    this.bodyAccelLat = 0;
     // Back to the default chase framing, snapped so the first frame is already there.
     this.cameraOrbit = 0;
     this.cameraElevation = CAMERA_ELEVATION;
@@ -781,6 +872,7 @@ export class DriveEngine {
     this.clearSkids();
     this.tireSmoke.clear();
     this.smokeBuild = 0;
+    this.applyStanceVisuals();
     this.updateShadowFrustum();
   }
 
@@ -984,8 +1076,8 @@ export class DriveEngine {
     const brake = grounded && this.isDown('s');
     const steerInput = grounded ? (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0) : 0;
     const handbrake = grounded && this.isDown(' ');
-    this.driftModeBlend = approach(this.driftModeBlend, this.driftModeEnabled ? 1 : 0, dt * 2.2);
-    this.handbrakeGripBlend = approach(this.handbrakeGripBlend, handbrake ? 1 : 0, dt * (handbrake ? 8 : 2.8));
+    // The handbrake lever builds rear lock progressively and releases quickly when let go.
+    this.handbrakeGripBlend = approach(this.handbrakeGripBlend, handbrake ? 1 : 0, dt * (handbrake ? 7.0 : 4.8));
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     let longitudinal = this.velocity.dot(this.forward);
@@ -993,6 +1085,7 @@ export class DriveEngine {
     if (this.settings.transmissionMode === 'automatic') this.updateAutomaticTransmission(longitudinal, gas);
     const burnout = gas && brake && this.velocity.length() < 1.15;
     this.burnoutActive = burnout;
+    const tyres = this.chassisOutput;
     const drive = this.drivetrain.step({
       dt,
       gear: this.gear,
@@ -1002,16 +1095,30 @@ export class DriveEngine {
       tcs: this.tcsEnabled,
       grounded,
       forwardSpeed: longitudinal,
-      lateralSpeed: lateral,
+      frontSideUse: tyres.frontSideUse,
+      rearSideUse: tyres.rearSideUse,
+      frontFrictionMult: this.chassis.frontFrictionMultiplier,
+      rearFrictionMult: this.chassis.rearFrictionMultiplier,
+      frontLongStiffness: this.chassis.frontLongStiffness,
+      rearLongStiffness: this.chassis.rearLongStiffness,
+      frontPeakSlipRatio: this.chassis.frontPeakSlipRatio,
+      rearPeakSlipRatio: this.chassis.rearPeakSlipRatio,
+      frontPostPeakGrip: this.chassis.frontPostPeakGrip,
+      rearPostPeakGrip: this.chassis.rearPostPeakGrip,
     });
     this.rearSpin = drive.rearSpin;
     this.frontSpin = drive.frontSpin;
     this.tcsActive = drive.tcsActive;
 
+    const brakeMuMult = 0.70 * this.chassis.frontFrictionMultiplier + 0.30 * this.chassis.rearFrictionMultiplier;
+    const brakeSideUse = Math.min(0.92, 0.70 * tyres.frontSideUse + 0.30 * tyres.rearSideUse);
+    const brakeEllipse = Math.sqrt(Math.max(0.36, 1 - 0.55 * brakeSideUse * brakeSideUse));
+    const effectiveBraking = this.vehicle.braking * brakeMuMult * brakeEllipse;
+    const braking = brake && !burnout && Math.abs(longitudinal) > 0.33;
     if (brake) {
       // During a burnout the front brakes hold the car while the driven wheels spin.
       if (Math.abs(longitudinal) > 0.33) {
-        longitudinal = approach(longitudinal, 0, this.vehicle.braking * dt);
+        longitudinal = approach(longitudinal, 0, effectiveBraking * dt);
       } else {
         longitudinal = 0;
       }
@@ -1024,148 +1131,55 @@ export class DriveEngine {
         + (!gas && this.gear !== 0 ? ENGINE_BRAKING / Math.pow(Math.max(1, Math.abs(this.gear)), 0.6) : 0);
       longitudinal = approach(longitudinal, 0, resistance * dt);
     }
-
-    // Keep world momentum independent from body heading while the tire forces
-    // update the body-frame forward and lateral components below.
     this.velocity.copy(this.forward).multiplyScalar(longitudinal).addScaledVector(this.right, lateral);
     const speed = this.velocity.length();
-    const steeringDemand = THREE.MathUtils.clamp(Math.abs(steerInput) * (0.25 + speed / 12), 0, 1);
-    const reversalImpulse = this.previousSteerInput * steerInput < 0
-      ? THREE.MathUtils.clamp(Math.abs(steerInput - this.previousSteerInput) * 0.5, 0, 1) * THREE.MathUtils.clamp(speed / 20, 0, 1)
-      : 0;
-    this.flickLoad = Math.max(reversalImpulse, this.flickLoad * Math.exp(-dt / 0.28));
-    this.previousSteerInput = steerInput;
-    // Steering geometry stays tuned to the catalog size, so scaling the cars up
-    // does not widen their turning circle.
-    const wheelbase = Math.max(2, this.vehicle.length / VEHICLE_SCALE * 0.58);
-    // Speed-sensitive steering: full lock when parking, a few degrees at speed,
-    // as a driver really steers. Drift mode keeps more lock for counter-steer.
-    const steeringSpeedScale = 1 / (1 + Math.pow(speed / STEERING_FADE_SPEED, 1.6));
-    const maxSteeringAngle = Math.min(0.78, this.vehicle.steering * 0.5)
-      * THREE.MathUtils.lerp(steeringSpeedScale, Math.max(steeringSpeedScale, 0.6), this.driftModeBlend);
-    // Preserve A/D steering direction; drift yaw follows this filtered wheel angle.
-    const steeringTarget = steerInput * maxSteeringAngle;
-    const steeringReleased = Math.abs(steerInput) <= 0.05;
-    const steeringResponse = steeringReleased
-      ? THREE.MathUtils.lerp(3.8, 0.8, this.driftModeBlend)
-      : THREE.MathUtils.lerp(3.8, 2.8, this.driftModeBlend);
-    this.frontWheelAngle = approach(this.frontWheelAngle, steeringTarget, steeringResponse * this.vehicle.handling * dt);
-    const yawSteeringAngle = THREE.MathUtils.lerp(steeringTarget, this.frontWheelAngle, this.driftModeBlend);
-    // Drift'te dönüş hızı yalnızca ileri hızdan değil toplam hızdan hesaplanır;
-    // aksi halde araç yan giderken ileri hız düşüp dönüş durur (açı sınırı).
-    const yawSpeed = THREE.MathUtils.lerp(longitudinal, Math.max(longitudinal, speed * DRIFT_TUNING.yawUsesTotalSpeed), this.driftModeBlend);
-    // Spinning front tyres have little left for turning: power understeer.
-    const steeringYawRate = yawSpeed / wheelbase * Math.tan(yawSteeringAngle) * (1 - 0.45 * this.frontSpin);
 
-    const normalLateralGrip = this.vehicle.handling * (steeringDemand < 0.05 ? 11.5 : 9.8);
-    // The old drift setting recovered lateral velocity in roughly 0.15–0.25 s,
-    // which made a lifted throttle feel like an invisible brake. Keep some
-    // stabilizing tire response, but let the car carry its slide long enough
-    // for throttle and counter-steer to shape it.
-    const driftLateralGrip = this.vehicle.handling * Math.max(
-      DRIFT_TUNING.minGrip,
-      DRIFT_TUNING.baseGrip - steeringDemand * 0.9 - (0.2 + (DRIFT_TUNING.gasGripLoss - 0.2) * this.rearSpin) + (brake ? 0.35 : 0),
+    // Speed-sensitive steering, self-aligning caster, and counter-steer assistance.
+    this.frontWheelAngle = this.chassis.updateSteering(
+      this.frontWheelAngle,
+      steerInput,
+      longitudinal,
+      lateral,
+      this.yawRate,
+      this.vehicle.handling,
+      this.vehicle.steering,
+      dt,
     );
-    let lateralRecovery = THREE.MathUtils.lerp(normalLateralGrip, driftLateralGrip, this.driftModeBlend);
-    if (brake && speed > 7) {
-      lateralRecovery *= 1 - 0.14 * THREE.MathUtils.clamp((speed - 7) / 16, 0, 1) * steeringDemand;
-    }
-    lateralRecovery *= 1 - this.flickLoad * (0.06 + 0.08 * this.driftModeBlend);
-    // Rear tyres spinning under power lose side grip: power oversteer. Without
-    // enough torque at the current gear and rpm the tyres hook up and the slide dies.
-    lateralRecovery *= 1 - this.rearSpin * THREE.MathUtils.lerp(0.4, 0.55, this.driftModeBlend);
-    if (speed > 4 && this.handbrakeGripBlend > 0) {
-      const handbrakeGrip = this.vehicle.handling * THREE.MathUtils.lerp(2.25, 1.3, this.driftModeBlend);
-      lateralRecovery = THREE.MathUtils.lerp(lateralRecovery, Math.min(lateralRecovery, handbrakeGrip), this.handbrakeGripBlend);
-    }
-    // On a drift-mode coast with no steering/brake input, keep some sideways
-    // momentum. Counter-steer and braking retain their separate grip response.
-    if (steeringReleased && !brake && !handbrake) {
-      lateralRecovery *= THREE.MathUtils.lerp(1, 0.6, this.driftModeBlend);
-    }
-    const counterSteering = Math.abs(lateral) > 0.1 && Math.abs(steerInput) > 0.05 && Math.sign(lateral) === Math.sign(steerInput);
-    if (counterSteering) {
-      const counterSteerGrip = THREE.MathUtils.lerp(3.2, 0.2, this.driftModeBlend);
-      lateralRecovery += this.vehicle.handling * counterSteerGrip * Math.abs(steerInput);
-    }
-    // Kayma açısı büyüdükçe tutuş azalır: araç açıyı korur, kendiliğinden toparlanmaz.
-    const slipRatio = Math.abs(lateral) / Math.max(Math.abs(longitudinal), 4);
-    lateralRecovery *= 1 - DRIFT_TUNING.slipGripLoss
-      * THREE.MathUtils.clamp(slipRatio * DRIFT_TUNING.slipGripSensitivity, 0, 1) * this.driftModeBlend;
 
-    const releaseYawAssist = steeringReleased ? 0.1 * (1 - this.driftModeBlend) : 0;
-    const counterSteerYaw = counterSteering ? 0.1 * Math.abs(steerInput) : 0;
-    const driftSlipYaw = 0.12 + 0.14 * this.driftModeBlend;
-    const releasedSlipYaw = THREE.MathUtils.lerp(driftSlipYaw, 0.16, steeringReleased ? this.driftModeBlend : 0);
-    const driftCounterYaw = counterSteerYaw * (1 - 0.6 * this.driftModeBlend);
-    const slipYawRate = lateral / wheelbase * (
-      releasedSlipYaw + 0.12 * this.handbrakeGripBlend + releaseYawAssist + driftCounterYaw
-    ) * (1 - DRIFT_TUNING.selfAlignCut * this.driftModeBlend);
-    const handbrakeTurn = handbrake && speed > 5 && Math.abs(steerInput) > 0.05;
-    // On grip the tyres can only bend the path as hard as their friction
-    // allows (~1.1 g): yaw rate = lateral acceleration / speed. A slide (drift
-    // mode, handbrake) rotates the body beyond that, as before.
-    const gripLateralAccel = GRAVITY * (GRIP_LATERAL_G + 0.2 * this.vehicle.handling);
-    const slideYawCap = this.vehicle.handling * (handbrakeTurn ? 30 : 45) / Math.max(speed, 2.5);
-    const yawCapBySpeed = handbrakeTurn
-      ? slideYawCap
-      : THREE.MathUtils.lerp(gripLateralAccel / Math.max(speed, 2.5), slideYawCap, this.driftModeBlend);
-    const maximumYawRate = Math.min(handbrakeTurn ? 1.9 : 2.1 + 0.3 * this.driftModeBlend, yawCapBySpeed);
-    const yawRateLimit = Math.min(2.4, maximumYawRate * (handbrakeTurn ? 1.5 : 1));
-    const driftYawRateLimit = yawRateLimit * (1 + 0.65 * this.driftModeBlend);
-    const targetYawRate = THREE.MathUtils.clamp(steeringYawRate + slipYawRate, -driftYawRateLimit, driftYawRateLimit);
-    const speedLoad = THREE.MathUtils.clamp(speed / 35, 0, 1);
-    // Yaw builds up more gently at speed: no instant darting.
-    const normalYawAcceleration = THREE.MathUtils.lerp(7.5, 3.6, speedLoad);
-    const driftYawAcceleration = THREE.MathUtils.lerp(DRIFT_TUNING.yawAccelLow, DRIFT_TUNING.yawAccelHigh, speedLoad);
-    const yawAcceleration = this.vehicle.handling * THREE.MathUtils.lerp(normalYawAcceleration, driftYawAcceleration, this.driftModeBlend);
-    const releasedYawAcceleration = this.vehicle.handling * 1.4;
-    const yawRateResponse = THREE.MathUtils.lerp(
-      yawAcceleration,
-      releasedYawAcceleration,
-      steeringReleased ? this.driftModeBlend : 0,
-    );
-    if (grounded) this.yawRate = approach(this.yawRate, targetYawRate, yawRateResponse * dt);
-    const previousYaw = this.yaw;
-    this.yaw += this.yawRate * dt;
-    if (grounded) {
-      // Turn about the rear axle, as a car on grip does: the rear follows its
-      // path and the nose swings with the front wheels. A slide pivots the
-      // body closer to its middle.
-      const pivotBehind = this.vehicle.length * REAR_AXLE_SHARE * (1 - Math.min(1, this.driftValue * 1.5));
-      this.carRoot.position.x += (Math.sin(this.yaw) - Math.sin(previousYaw)) * pivotBehind;
-      this.carRoot.position.z += (Math.cos(this.yaw) - Math.cos(previousYaw)) * pivotBehind;
-    }
+    // 4-wheel tyre model turns and pushes the car (see chassis.ts).
+    const body = this.chassisBody;
+    body.yaw = this.yaw;
+    body.yawRate = this.yawRate;
+    this.chassisOutput = this.chassis.step(body, {
+      dt,
+      steer: this.frontWheelAngle,
+      grounded,
+      accelLong: this.bodyAccelLong,
+      accelLat: this.bodyAccelLat,
+      frontLongUse: drive.frontLongUse,
+      rearLongUse: drive.rearLongUse,
+      frontSpin: drive.frontSpin,
+      rearSpin: drive.rearSpin,
+      frontSlipSpeed: this.drivetrain.frontWheelSpeed - longitudinal,
+      rearSlipSpeed: this.drivetrain.rearWheelSpeed - longitudinal,
+      rearLock: this.handbrakeGripBlend,
+      braking: braking ? this.vehicle.braking : 0,
+      drivenTraction: drive.accel,
+      wheelSuspensionLoads: this.wheelSuspensionLoads,
+    });
+    this.yaw = body.yaw;
+    this.yawRate = body.yawRate;
 
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    // Reproject world momentum against the updated heading, then let grip
-    // gradually reduce lateral speed instead of snapping it to zero.
     longitudinal = this.velocity.dot(this.forward);
     lateral = this.velocity.dot(this.right);
-    const lateralBefore = lateral;
-    if (grounded) lateral *= Math.exp(-lateralRecovery * dt);
-    // Kaybolan yanal hızın bir kısmı ileri hıza döner (gazla kayarken hız korunur).
-    // Araç geriye doğru kayıyorsa veya frendeyse uygulanmaz.
-    if (longitudinal > 0 && !brake) {
-      longitudinal += Math.abs(lateralBefore - lateral) * DRIFT_TUNING.slideDriveBoost
-        * this.driftModeBlend * (gas ? 0.3 + 0.7 * this.rearSpin : 0.3);
-    }
-    // Frende yanal hız da hızla söner (kilitlenmiş lastik gibi durur).
-    if (brake) lateral *= Math.exp(-DRIFT_TUNING.brakeLateralDecay * dt);
-    // Kayma sürtünmesi: gaz basılıyken az, değilken fazla.
-    longitudinal *= Math.exp(
-      -DRIFT_TUNING.slideDrag * Math.min(Math.abs(lateral), 14) * this.driftModeBlend * THREE.MathUtils.lerp(1, DRIFT_TUNING.slideDragGas, gas ? this.rearSpin : 0) * dt,
-    );
+    // Sliding: the rear tyres are past their grip (or locked by the handbrake).
     const slipAngle = Math.atan2(Math.abs(lateral), Math.max(Math.abs(longitudinal), 1));
-    const drifting = (handbrake || this.driftModeBlend > 0.15 || this.driftValue > 0.08)
-      && speed > 6 && slipAngle > 0.12 && Math.abs(lateral) > 1.25;
-    const driftSeverity = THREE.MathUtils.clamp((slipAngle - 0.12) / 0.42, 0, 1);
+    const driftSeverity = this.chassisOutput.rearSlide;
+    const drifting = speed > 6 && Math.abs(lateral) > 1 && driftSeverity > 0.05;
     this.driftValue = drifting ? Math.min(1, this.driftValue + dt * (1.5 + driftSeverity * 2)) : Math.max(0, this.driftValue - dt * 3.4);
 
-    this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    this.velocity.copy(this.forward).multiplyScalar(longitudinal).addScaledVector(this.right, lateral);
     const speedMagnitude = this.velocity.length();
     const absoluteLimit = this.vehicle.maxSpeed / ECONOMY.kmhPerUnit + 2;
     if (speedMagnitude > absoluteLimit) this.velocity.multiplyScalar(absoluteLimit / speedMagnitude);
@@ -1174,7 +1188,7 @@ export class DriveEngine {
     this.checkSpeedGates();
     this.updateSuspension(dt);
     this.carRoot.rotation.set(-this.bodyPitch, this.yaw, this.bodyRoll);
-    this.carRoot.position.y = this.bodyHeight + 0.015 + (drifting ? Math.min(0.045, this.driftValue * 0.045) : 0);
+    this.carRoot.position.y = this.bodyHeight + 0.015;
     // Skid marks are laid flat on the map, so only draw them there.
     this.updateSkids((drifting || this.rearSpin > 0.3) && !this.airborne, slipAngle, speed);
     this.wheelTravel += this.drivetrain.frontWheelSpeed * dt;
@@ -1183,15 +1197,11 @@ export class DriveEngine {
     this.updateTireSmoke(
       dt,
       this.airborne ? 0 : burnout ? 1 : Math.max(slideSmoke, this.rearSpin),
-      this.airborne ? 0 : this.frontSpin,
+      this.airborne ? 0 : Math.max(this.frontSpin, speed > 6 ? this.chassisOutput.frontSlide * 0.6 : 0),
     );
-    // Görsel karşı direksiyon: kayarken ön tekerlekler aracın gittiği yöne bakar.
-    const slideWheelAngle = THREE.MathUtils.clamp(
-      Math.atan2(lateral, Math.max(longitudinal, 2)), -DRIFT_TUNING.counterSteerMax, DRIFT_TUNING.counterSteerMax,
-    );
-    const visualFrontAngle = THREE.MathUtils.lerp(this.frontWheelAngle, slideWheelAngle, Math.min(1, this.driftValue * 2.5));
-    setVehicleWheelSpin(this.visual, this.wheelTravel, visualFrontAngle, this.rearWheelTravel);
-    setVehicleSuspension(this.visual, this.suspensionTravel);
+    // The wheels show the real steering angle, counter-steer included.
+    setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel, this.stance);
+    setVehicleSuspension(this.visual, this.suspensionTravel, this.stance);
     setVehicleLights(this.visual, this.isDown('s'), this.gear === -1);
   }
 
@@ -1227,25 +1237,48 @@ export class DriveEngine {
     const accelLong = THREE.MathUtils.clamp((this.velocity.dot(this.forward) - this.previousVelocity.dot(this.forward)) / dt, -limit, limit);
     const accelLat = THREE.MathUtils.clamp((this.velocity.dot(this.right) - this.previousVelocity.dot(this.right)) / dt, -limit, limit);
     this.previousVelocity.copy(this.velocity);
+    this.bodyAccelLong = accelLong;
+    this.bodyAccelLat = accelLat;
 
-    // Static load per wheel so the car rests level even when the axles are off-centre.
-    let frontZ = 0;
-    let rearZ = 0;
-    for (const wheel of wheels) {
-      if (wheel.z > 0) frontZ += wheel.z / 2;
-      else rearZ += wheel.z / 2;
+    // Cache per-vehicle suspension geometry & constants so we don't recompute them every frame/substep.
+    if (this.suspCachedWheels !== wheels) {
+      this.suspCachedWheels = wheels;
+      let frontZ = 0;
+      let rearZ = 0;
+      for (let i = 0; i < 4; i += 1) {
+        const w = wheels[i];
+        if (w.z > 0) frontZ += w.z * 0.5;
+        else rearZ += w.z * 0.5;
+      }
+      const wheelbase = Math.max(frontZ - rearZ, 0.5);
+      const omega = 2 * Math.PI * SUSPENSION.frequencyHz;
+      this.suspSpringRate = 0.25 * omega * omega;
+      this.suspDamperRate = 2 * SUSPENSION.dampingRatio * 0.25 * omega;
+      this.suspPitchInertia = (SUSPENSION.pitchGyration * this.vehicle.length) ** 2;
+      this.suspRollInertia = (SUSPENSION.rollGyration * this.vehicle.width) ** 2;
+      let springRollStiffness = 0;
+      for (let i = 0; i < 4; i += 1) {
+        const w = wheels[i];
+        springRollStiffness += this.suspSpringRate * w.x * w.x;
+        this.wheelStaticLoad[i] = GRAVITY * 0.5 * (w.z > 0 ? -rearZ : frontZ) / wheelbase;
+        // Map suspension wheel index to Chassis [FL=0, FR=1, RL=2, RR=3].
+        this.wheelToChassisIdx[i] = (w.z > 0 ? 0 : 2) + (w.x > 0 ? 0 : 1);
+      }
+      this.suspAntiRollStiffness = springRollStiffness * SUSPENSION.antiRollShare;
     }
-    const wheelbase = Math.max(frontZ - rearZ, 0.5);
-    const omega = 2 * Math.PI * SUSPENSION.frequencyHz;
-    const springRate = 0.25 * omega * omega;
-    const damperRate = 2 * SUSPENSION.dampingRatio * 0.25 * omega;
-    const pitchInertia = (SUSPENSION.pitchGyration * this.vehicle.length) ** 2;
-    const rollInertia = (SUSPENSION.rollGyration * this.vehicle.width) ** 2;
-    let springRollStiffness = 0;
-    for (const wheel of wheels) springRollStiffness += springRate * wheel.x * wheel.x;
-    const antiRollStiffness = springRollStiffness * SUSPENSION.antiRollShare;
 
-    const groundRate = [0, 0, 0, 0];
+    const springRate = this.suspSpringRate * this.stance.springStiffnessMult;
+    const damperRate = this.suspDamperRate * this.stance.damperStiffnessMult;
+    const pitchInertia = this.suspPitchInertia;
+    const rollInertia = this.suspRollInertia;
+    const antiRollStiffness = this.suspAntiRollStiffness * this.stance.antiRollBarMult;
+    const groundRate = this.groundRate;
+    const forwardSpeed = Math.max(0, this.velocity.dot(this.forward));
+    const downforceG = aeroDownforceG(this.aeroProfile, forwardSpeed);
+    const frontAeroWheelLoad = GRAVITY * downforceG * 0.5 * this.aeroProfile.frontAeroShare;
+    const rearAeroWheelLoad = GRAVITY * downforceG * 0.5 * (1 - this.aeroProfile.frontAeroShare);
+    const aeroPullDown = GRAVITY * downforceG * 1.65;
+
     for (let i = 0; i < 4; i += 1) {
       const wheel = wheels[i];
       const ground = groundHeightAt(
@@ -1253,8 +1286,10 @@ export class DriveEngine {
         position.x + this.forward.x * wheel.z + this.right.x * wheel.x,
         position.z + this.forward.z * wheel.z + this.right.z * wheel.x,
       );
-      // A drop off a ramp edge is not a ground velocity the damper should feel.
-      groundRate[i] = ground >= this.wheelGround[i] ? (ground - this.wheelGround[i]) / dt : 0;
+      const groundDelta = ground - this.wheelGround[i];
+      // Ignore vertical cliff drops off a ramp edge, but track smooth downhill & uphill road slopes
+      // with capped upward kick so crest triangle transitions do not launch high-downforce cars.
+      groundRate[i] = groundDelta < -0.28 ? 0 : THREE.MathUtils.clamp(groundDelta / dt, -14, 4.8);
       this.wheelGround[i] = ground;
     }
 
@@ -1267,9 +1302,11 @@ export class DriveEngine {
       let rollTorque = 0;
       let worstPenetration = 0;
       contacts = 0;
+      const isLastStep = step === steps - 1;
       for (let i = 0; i < 4; i += 1) {
         const wheel = wheels[i];
-        const staticLoad = GRAVITY / 2 * (wheel.z > 0 ? -rearZ : frontZ) / wheelbase;
+        const staticLoad = this.wheelStaticLoad[i];
+        const aeroWheelLoad = wheel.z > 0 ? frontAeroWheelLoad : rearAeroWheelLoad;
         const corner = this.bodyHeight + wheel.z * this.bodyPitch + wheel.x * this.bodyRoll;
         const compression = this.wheelGround[i] - corner;
         const compressionRate = groundRate[i] - (this.heaveVelocity + wheel.z * this.pitchRate + wheel.x * this.rollRate);
@@ -1279,8 +1316,16 @@ export class DriveEngine {
             + damperRate * SUSPENSION.bumpStopDamping * compressionRate;
         }
         // Springs only push; a wheel hanging below its full droop has left the ground.
-        if (compression <= -staticLoad / springRate || load <= 0) load = 0;
-        else contacts += 1;
+        // Aerodynamic downforce extends effective ground contact across crests.
+        const maxDroop = (staticLoad + aeroWheelLoad * 0.85) / springRate;
+        if (compression <= -maxDroop || load + aeroWheelLoad <= 0) {
+          load = 0;
+        } else {
+          contacts += 1;
+        }
+        if (isLastStep) {
+          this.wheelSuspensionLoads[this.wheelToChassisIdx[i]] = contacts > 0 && load > 0 ? load + aeroWheelLoad : 0;
+        }
         worstPenetration = Math.max(worstPenetration, compression - SUSPENSION.hardLimit);
         force += load;
         pitchTorque += load * wheel.z;
@@ -1290,12 +1335,19 @@ export class DriveEngine {
       if (contacts > 0) {
         pitchTorque += accelLong * SUSPENSION.centerOfMassHeight;
         rollTorque += accelLat * SUSPENSION.centerOfMassHeight - antiRollStiffness * this.bodyRoll;
+        // Aerodynamic downforce strongly resists upward body lift over crests.
+        if (this.heaveVelocity > 0) {
+          this.heaveVelocity = Math.max(0, this.heaveVelocity - aeroPullDown * h);
+          this.heaveVelocity *= Math.exp(-3.2 * downforceG * h);
+        }
       } else {
         const spinLoss = Math.exp(-SUSPENSION.airAngularDamping * h);
         this.pitchRate *= spinLoss;
         this.rollRate *= spinLoss;
       }
-      this.heaveVelocity += (force - GRAVITY) * h;
+      // When airborne or unloading over a crest, aerodynamic downforce pulls the car back to the road.
+      const downwardGravity = contacts < 4 ? GRAVITY + aeroPullDown : GRAVITY;
+      this.heaveVelocity += (force - downwardGravity) * h;
       this.pitchRate += pitchTorque / pitchInertia * h;
       this.rollRate += rollTorque / rollInertia * h;
       this.bodyHeight += this.heaveVelocity * h;
@@ -1311,7 +1363,7 @@ export class DriveEngine {
 
     for (let i = 0; i < 4; i += 1) {
       const wheel = wheels[i];
-      const staticLoad = GRAVITY / 2 * (wheel.z > 0 ? -rearZ : frontZ) / wheelbase;
+      const staticLoad = this.wheelStaticLoad[i];
       const corner = this.bodyHeight + wheel.z * this.bodyPitch + wheel.x * this.bodyRoll;
       this.suspensionTravel[i] = THREE.MathUtils.clamp(this.wheelGround[i] - corner, -staticLoad / springRate, SUSPENSION.hardLimit);
     }
@@ -1643,12 +1695,18 @@ export class DriveEngine {
     const halfWidth = this.vehicle.width * 0.42;
     const sin = Math.sin(this.yaw);
     const cos = Math.cos(this.yaw);
-    for (const along of [-halfLength, 0, halfLength]) {
-      for (const across of [-halfWidth, halfWidth]) {
-        if (walls.blocked(x + sin * along + cos * across, z + cos * along - sin * across)) return true;
-      }
-    }
-    return false;
+    const rx = cos * halfWidth;
+    const rz = -sin * halfWidth;
+    const fx = sin * halfLength;
+    const fz = cos * halfLength;
+    return (
+      walls.blocked(x - fx - rx, z - fz - rz) ||
+      walls.blocked(x - fx + rx, z - fz + rz) ||
+      walls.blocked(x - rx, z - rz) ||
+      walls.blocked(x + rx, z + rz) ||
+      walls.blocked(x + fx - rx, z + fz - rz) ||
+      walls.blocked(x + fx + rx, z + fz + rz)
+    );
   }
 
   private handleCollisions(): void {
@@ -1700,20 +1758,37 @@ export class DriveEngine {
     this.atmosphere.follow(this.camera);
     this.motionBlur.render(this.scene, this.camera, strength, this.blurFocus);
     // Lit brake lamps spread their light (only while one is lit).
-    if (this.settings.effects && this.settings.quality !== 'low' && this.visual.lights.brake) this.lampBloom.render(this.scene, this.camera);
+    if (this.settings.effects && this.settings.quality !== 'low' && this.visual.lights.brake) this.lampBloom.render(this.scene, this.camera, this.carRoot);
   }
 
   private updateCamera(dt: number, snap = false): void {
     const sizeScale = this.vehicle.length / CAMERA_REFERENCE_LENGTH;
     const targetHeight = CAMERA_TARGET_HEIGHT * this.vehicle.height / CAMERA_REFERENCE_HEIGHT;
-    const smoothing = snap ? 1 : 1 - Math.pow(1 - this.settings.cameraFollow, dt * 60);
+    const speed = this.velocity.length();
+    const heightSmoothing = snap ? 1 : 1 - Math.pow(1 - this.settings.cameraFollow, dt * 60);
+    const yawSmoothing = snap ? 1 : 1 - Math.pow(1 - this.settings.cameraFollow * 0.62, dt * 60);
+
+    // Blend camera target heading toward the car's velocity vector when moving forward
+    // so the camera stays calm along the travel path instead of whipping left/right
+    // every time the tail kicks out or transitions during a drift.
+    let desiredHeading = this.yaw;
+    const forwardSpeed = this.velocity.x * Math.sin(this.yaw) + this.velocity.z * Math.cos(this.yaw);
+    if (!snap && forwardSpeed > 3.0 && speed > 3.5) {
+      const travelYaw = Math.atan2(this.velocity.x, this.velocity.z);
+      const slipDelta = THREE.MathUtils.euclideanModulo(travelYaw - this.yaw + Math.PI, Math.PI * 2) - Math.PI;
+      if (Math.abs(slipDelta) < 1.45) {
+        const travelBlend = THREE.MathUtils.smoothstep(speed, 3.5, 11.0) * 0.58;
+        desiredHeading = this.yaw + slipDelta * travelBlend;
+      }
+    }
+
     // Only the heading and the height are smoothed. The distance to the car
     // stays fixed, so speed never drags the camera back; past the pull-back
     // speed it eases out by a hair.
-    this.cameraHeading += (THREE.MathUtils.euclideanModulo(this.yaw - this.cameraHeading + Math.PI, Math.PI * 2) - Math.PI) * smoothing;
-    this.cameraHeight += (this.carRoot.position.y + targetHeight - this.cameraHeight) * smoothing;
+    this.cameraHeading += (THREE.MathUtils.euclideanModulo(desiredHeading - this.cameraHeading + Math.PI, Math.PI * 2) - Math.PI) * yawSmoothing;
+    this.cameraHeight += (this.carRoot.position.y + targetHeight - this.cameraHeight) * heightSmoothing;
     this.cameraTarget.set(this.carRoot.position.x, this.cameraHeight, this.carRoot.position.z);
-    const pullBack = THREE.MathUtils.smoothstep(this.velocity.length(), CAMERA_PULLBACK_START, CAMERA_PULLBACK_FULL);
+    const pullBack = THREE.MathUtils.smoothstep(speed, CAMERA_PULLBACK_START, CAMERA_PULLBACK_FULL);
     const distance = CAMERA_DISTANCE * sizeScale * (1 + CAMERA_PULLBACK * pullBack) * this.cameraZoom;
     const orbitInput = Number(this.keys.has('arrowright')) - Number(this.keys.has('arrowleft'));
     const elevationInput = Number(this.keys.has('arrowup')) - Number(this.keys.has('arrowdown'));
@@ -1723,13 +1798,43 @@ export class DriveEngine {
     );
     this.cameraElevation = THREE.MathUtils.clamp(this.cameraElevation + elevationInput * dt * 0.62, 0.12, 0.9);
     const cameraYaw = this.cameraHeading + this.cameraOrbit;
+    const sinCam = Math.sin(cameraYaw);
+    const cosCam = Math.cos(cameraYaw);
     const horizontalDistance = distance * Math.cos(this.cameraElevation);
     this.camera.position.set(
-      this.carRoot.position.x - Math.sin(cameraYaw) * horizontalDistance,
+      this.carRoot.position.x - sinCam * horizontalDistance,
       this.cameraTarget.y + distance * Math.sin(this.cameraElevation),
-      this.carRoot.position.z - Math.cos(cameraYaw) * horizontalDistance,
+      this.carRoot.position.z - cosCam * horizontalDistance,
     );
+    // Reactions to acceleration, gear changes, cornering and speed. Only the
+    // lens moves, not the point it aims at, so they read as a lean, not a slide.
+    const motion = this.cameraMotion;
+    if (snap) {
+      motion.reset();
+      this.cameraGear = this.gear;
+    } else {
+      const gearChange = this.gear > this.cameraGear && this.cameraGear >= 1 ? 1 : this.gear < this.cameraGear && this.gear >= 1 ? -1 : 0;
+      this.cameraGear = this.gear;
+      motion.update({
+        dt,
+        accelLong: this.airborne ? 0 : this.bodyAccelLong,
+        accelLat: this.airborne ? 0 : this.bodyAccelLat,
+        bodyRoll: this.bodyRoll,
+        speed,
+        gearChange,
+      });
+    }
+    const motionScale = sizeScale * this.cameraZoom;
+    const surgeOffset = motion.surge * motionScale;
+    const swayOffset = (motion.sway + motion.shake.x) * motionScale;
+    this.camera.position.x += sinCam * surgeOffset + cosCam * swayOffset;
+    this.camera.position.z += cosCam * surgeOffset - sinCam * swayOffset;
+    this.camera.position.y += motion.shake.y * motionScale;
     this.camera.lookAt(this.cameraTarget);
+    // The camera looks down its own -Z, which points along the car: rolling
+    // with the body is a negative turn about the camera's Z.
+    this.camera.rotateX(motion.pitch + motion.shake.pitch);
+    this.camera.rotateZ(-motion.roll + motion.shake.roll);
   }
 
   private forwardSpeedKmh(): number {
@@ -1754,9 +1859,13 @@ export class DriveEngine {
 
   private makeTelemetry(): Telemetry {
     const signed = this.velocity.dot(this.forward);
-    const speed = Math.abs(signed) * ECONOMY.kmhPerUnit;
-    const rpm = Math.round(this.drivetrain.rpm);
-    return { speedKmh: speed, gear: this.gear, rpm, drifting: this.driftValue > 0.2, tcsActive: this.tcsActive };
+    const t = this.telemetryState;
+    t.speedKmh = Math.abs(signed) * ECONOMY.kmhPerUnit;
+    t.gear = this.gear;
+    t.rpm = Math.round(this.drivetrain.rpm);
+    t.drifting = this.driftValue > 0.2;
+    t.tcsActive = this.tcsActive;
+    return t;
   }
 
   dispose(): void {

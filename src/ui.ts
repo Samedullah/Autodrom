@@ -8,7 +8,7 @@ import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel } from
 export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'pause' | 'store' | 'multiplayer' | null;
 export type UiAction = 'start' | 'continue' | 'starter' | 'garage' | 'store' | 'maps' | 'settings' | 'pause'
   | 'resume' | 'main' | 'select-starter' | 'buy' | 'activate' | 'choose-map' | 'close' | 'fullscreen' | 'reset-position'
-  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-drift' | 'toggle-tcs'
+  | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-tcs'
   | 'multiplayer' | 'multiplayer-create' | 'multiplayer-join' | 'multiplayer-leave' | 'copy-room';
 
 export interface UiSnapshot {
@@ -47,7 +47,6 @@ export class GameInterface {
   private readonly gearValue: HTMLElement;
   private readonly tach: HTMLElement;
   private readonly tachNeedle: SVGGElement;
-  private readonly driftModeButton: HTMLButtonElement;
   private readonly tcsLamp: SVGSVGElement;
   private readonly cashValue: HTMLElement;
   private readonly mapValue: HTMLElement;
@@ -71,7 +70,7 @@ export class GameInterface {
       '<header class="topbar">' +
         '<div class="brand-lockup"><span class="brand-mark">A</span><span><b>AUTODROM</b><small>DRIVE&nbsp; / &nbsp;BUILD</small></span></div>' +
         '<div class="cash-card"><span class="cash-label">GARAJ BAKİYESİ</span><strong id="cash-value">₺10.000</strong><i class="cash-dot"></i><div class="income-toast" id="income-toast"></div></div>' +
-        '<div class="top-meta"><span class="live-chip"><i></i> CANLI SÜRÜŞ</span><span class="map-pill" id="map-value">ŞEHİR İÇİ</span><button class="multiplayer-toggle" type="button" data-action="multiplayer" aria-label="Multiplayer odaları">ONLINE</button><button class="drift-mode-toggle" type="button" data-action="toggle-drift" aria-label="Drift modunu aç" aria-pressed="false"><span>DRIFT</span><b>KAPALI</b></button><button class="icon-button pause-button" data-action="pause" aria-label="Oyunu duraklat">Ⅱ</button></div>' +
+        '<div class="top-meta"><span class="live-chip"><i></i> CANLI SÜRÜŞ</span><span class="map-pill" id="map-value">ŞEHİR İÇİ</span><button class="multiplayer-toggle" type="button" data-action="multiplayer" aria-label="Multiplayer odaları">ONLINE</button><button class="icon-button pause-button" data-action="pause" aria-label="Oyunu duraklat">Ⅱ</button></div>' +
       '</header>' +
       '<nav class="side-rail" aria-label="Oyun menüsü">' +
         '<button class="rail-button" data-action="store" aria-label="Araç mağazası"><span>◈</span><small>MAĞAZA</small></button>' +
@@ -109,7 +108,6 @@ export class GameInterface {
     this.gearValue = host.querySelector('#gear-value') as HTMLElement;
     this.tach = host.querySelector('#tach') as HTMLElement;
     this.tachNeedle = host.querySelector('#tach-needle') as SVGGElement;
-    this.driftModeButton = host.querySelector('[data-action="toggle-drift"]') as HTMLButtonElement;
     this.tcsLamp = host.querySelector('.tcs-lamp') as SVGSVGElement;
     this.cashValue = host.querySelector('#cash-value') as HTMLElement;
     this.mapValue = host.querySelector('#map-value') as HTMLElement;
@@ -262,13 +260,6 @@ export class GameInterface {
     this.tachNeedle.style.transform = 'rotate(' + needleAngle.toFixed(1) + 'deg)';
     this.tach.classList.toggle('limiter', limiter);
     this.tcsLamp.classList.toggle('intervening', telemetry.tcsActive);
-  }
-
-  setDriftModeEnabled(enabled: boolean): void {
-    this.driftModeButton.classList.toggle('active', enabled);
-    this.driftModeButton.setAttribute('aria-pressed', String(enabled));
-    this.driftModeButton.setAttribute('aria-label', enabled ? 'Drift modunu kapat' : 'Drift modunu aç');
-    this.driftModeButton.querySelector('b')!.textContent = enabled ? 'AÇIK' : 'KAPALI';
   }
 
   setTcsEnabled(enabled: boolean): void {
@@ -520,6 +511,8 @@ export class GameInterface {
     const maps: Array<{ id: MapId; title: string; description: string; image: string; tag: string }> = [
       { id: 'city-highway', title: 'Şehir + Otoban', description: 'Şehir caddelerinden bağlantı yoluyla çevre otobanına kesintisiz sürüş. Hız kapılarında 200 km/sa ile geçip ₺5.000 kazan.', image: 'city-highway', tag: 'TEK, BAĞLI DÜNYA' },
       { id: 'spa', title: 'Spa-Francorchamps', description: '1992 düzeninde efsanevi Belçika pisti: La Source, Eau Rouge ve Raidillon dahil ~100 metrelik iniş çıkış, bariyerler ve pit binaları.', image: 'spa', tag: 'YARIŞ PİSTİ' },
+      { id: 'nurburgring', title: 'Nürburgring GP', description: 'Eifel dağlarındaki teknik Grand Prix pisti: geniş start düzlüğü, Castrol-S, Dunlop firketesi, hızlı şikanlar ve eğimli virajlar.', image: 'nurburgring', tag: 'GP PİSTİ' },
+      { id: 'bushido-peak', title: 'Bushido Peak', description: 'Japon dağ geçidi ve touge rotası: ~200 metrelik tırmanış, ardışık keskin virajlar, kasaba sokakları ve yüksek hızda drift etapları.', image: 'bushido-peak', tag: 'DAĞ GEÇİDİ · TOUGE' },
     ];
     return '<div class="modal-shell centered-modal"><div class="panel-topline"><div><div class="eyebrow">SÜRÜŞ ORTAMI</div><h2>Harita seçimi</h2></div><button class="close-button" data-action="' + (inGame || this.snapshot.save.starterChosen ? 'close' : 'main') + '">×</button></div>' +
       '<p class="modal-description">Şehir ve otoban birbirine bağlı tek dünya, ya da gerçek iniş çıkışlarıyla bir yarış pisti.</p><div class="map-cards">' +

@@ -4,11 +4,18 @@ import * as THREE from 'three';
 // lamp meshes themselves) are drawn into a small offscreen target, blurred,
 // and added on top of the frame. The light spreads from the real lamp shape
 // instead of from sprites floating next to it. Runs only while a lamp is lit.
+// The car body is drawn into the glow target's depth first (no colour), so
+// glow only shows where the lamp itself is visible: it no longer shines
+// through the bodywork and paint the car red from the inside.
 
 export const GLOW_LAYER = 3;
 
 const DOWNSCALE = 4;
-const BLUR_PASSES = [1, 2.2];   // widening radii: a soft core plus a wide falloff
+// Widening radii: a soft core plus a short falloff. Wider, the halo washed
+// the whole rear of the car red.
+const BLUR_PASSES = [0.8, 1.4];
+// Glow added on top of the frame.
+const GLOW_STRENGTH = 1.1;
 
 const quadVertex = /* glsl */ `
   varying vec2 vUv;
@@ -52,6 +59,7 @@ export class LampBloom {
   private readonly quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private readonly size = new THREE.Vector2();
   private readonly clearColor = new THREE.Color();
+  private readonly hidden: THREE.Object3D[] = [];
 
   constructor(private readonly renderer: THREE.WebGLRenderer) {
     const options = { type: THREE.HalfFloatType, depthBuffer: true } as const;
@@ -64,7 +72,7 @@ export class LampBloom {
       depthWrite: false,
     });
     this.composite = new THREE.ShaderMaterial({
-      uniforms: { glow: { value: this.targets[0].texture }, strength: { value: 1.6 } },
+      uniforms: { glow: { value: this.targets[0].texture }, strength: { value: GLOW_STRENGTH } },
       vertexShader: quadVertex,
       fragmentShader: compositeFragment,
       blending: THREE.AdditiveBlending,
@@ -85,25 +93,50 @@ export class LampBloom {
     for (const target of this.targets) target.setSize(width, height);
   }
 
-  /** Adds the glow of everything on GLOW_LAYER to the frame already on screen. */
-  render(scene: THREE.Scene, camera: THREE.Camera): void {
+  /**
+   * Adds the glow of everything on GLOW_LAYER to the frame already on screen.
+   * `occluder` (the car carrying the lamps) hides the glow wherever its body
+   * stands in front of a lamp.
+   */
+  render(scene: THREE.Scene, camera: THREE.Camera, occluder?: THREE.Object3D): void {
     const renderer = this.renderer;
     const [a, b] = this.targets;
     const mask = camera.layers.mask;
     const background = scene.background;
     const fog = scene.fog;
     const clearAlpha = renderer.getClearAlpha();
+    const autoClear = renderer.autoClear;
     renderer.getClearColor(this.clearColor);
     // The shadow map is already current for this frame.
     const shadowAutoUpdate = renderer.shadowMap.autoUpdate;
     renderer.shadowMap.autoUpdate = false;
-    camera.layers.set(GLOW_LAYER);
     scene.background = null;
     scene.fog = null;
     renderer.setClearColor(0x000000, 0);
     renderer.setRenderTarget(a);
     renderer.clear();
+    renderer.autoClear = false;
+    if (occluder) {
+      // Depth of the occluder only. Lights stay on, so no material needs a
+      // new shader; transparent lenses write no depth and do not hide lamps.
+      for (const child of scene.children) {
+        if (child !== occluder && child.visible && !(child as THREE.Light).isLight) {
+          child.visible = false;
+          this.hidden.push(child);
+        }
+      }
+      const color = renderer.state.buffers.color;
+      color.setMask(false);
+      color.setLocked(true);
+      renderer.render(scene, camera);
+      color.setLocked(false);
+      color.setMask(true);
+      for (const child of this.hidden) child.visible = true;
+      this.hidden.length = 0;
+    }
+    camera.layers.set(GLOW_LAYER);
     renderer.render(scene, camera);
+    renderer.autoClear = autoClear;
     camera.layers.mask = mask;
     scene.background = background;
     scene.fog = fog;
@@ -124,7 +157,6 @@ export class LampBloom {
 
     renderer.setRenderTarget(null);
     this.quad.material = this.composite;
-    const autoClear = renderer.autoClear;
     renderer.autoClear = false;
     renderer.render(this.quadScene, this.quadCamera);
     renderer.autoClear = autoClear;
