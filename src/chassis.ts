@@ -431,7 +431,16 @@ export class Chassis {
     const bodyAngle = speed > 1.5
       ? Math.atan2(lateral, safeLong)
       : 0;
-    const bodySlip = Math.abs(bodyAngle);
+    // In a tight grip turn the CG velocity points inside the nose purely from geometry
+    // (rear axle tracks, CG swings): that is NOT a slide. Only treat the body angle as a
+    // drift angle when the rear axle itself is travelling outward in the same direction.
+    const rearTravel = speed > 1.8
+      ? Math.atan2(lateral - this.rearArm * yawRate, safeLong)
+      : 0;
+    const rearOutward = Math.sign(rearTravel) === Math.sign(bodyAngle)
+      ? smoothstep(Math.abs(rearTravel), 0.04, 0.10)
+      : 0;
+    const bodySlip = Math.abs(bodyAngle) * rearOutward;
     if (dt > 1e-5) {
       const rawRate = (bodyAngle - this.prevBodyAngle) / dt;
       this.bodySlipRate += (clamp(rawRate, -6, 6) - this.bodySlipRate) * Math.min(1, dt * 18);
