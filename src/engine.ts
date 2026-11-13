@@ -6,6 +6,7 @@ import { brakeLampCenters, createVehicleVisual, disposeVehicleVisual, installGen
 import { VehicleAudio } from './vehicleAudio';
 import { TireSmoke } from './tireSmoke';
 import { MotionBlur } from './motionBlur';
+import { LensDrops } from './lensDrops';
 import { LampBloom } from './lampBloom';
 import { CameraMotion } from './cameraMotion';
 import { Atmosphere, DAYLIGHT } from './atmosphere';
@@ -82,12 +83,11 @@ const SMOKE_EMIT_INTERVAL = 0.03;
 const MODEL_LOAD_TIMEOUT_MS = 30000;
 // Headlight beam strength at full darkness (candela).
 const HEADLIGHT_INTENSITY = 1800;
-// Red light a lit brake lamp throws on the bumper, paint and road right behind it.
+// Red light a lit brake lamp throws on the bumper, paint and road around it.
 const BRAKE_SPILL_INTENSITY = 1.6;
 const BRAKE_SPILL_RANGE = 3.5;
-// Spill light distance behind the lamp lens.
-const BRAKE_SPILL_BEHIND = 0.18;
-const BRAKE_SPILL_OFFSET = new THREE.Vector3(0, 0, -BRAKE_SPILL_BEHIND);
+// Fallback distance behind the car when a model has no detected brake lamp meshes.
+const BRAKE_SPILL_BEHIND = 0.15;
 // Seconds between re-bakes of the sky reflections while the light changes.
 const ENVIRONMENT_BAKE_INTERVAL = 1.2;
 // Engine braking in 1st gear (m/s²), falling off in higher gears. Rolling and
@@ -177,6 +177,9 @@ export class DriveEngine {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly motionBlur: MotionBlur;
   private readonly lampBloom: LampBloom;
+  private readonly lensDrops: LensDrops;
+  /** Screen point (0..1) lens drops are blown away from at speed. */
+  private readonly dropFocus = new THREE.Vector2(0.5, 0.56);
   private readonly atmosphere = new Atmosphere(DAYLIGHT, SUN_OFFSET);
   private readonly environment: Environment;
   // Direction and distance from the shadow target to the light; follows the sun or moon.
@@ -377,8 +380,10 @@ export class DriveEngine {
     this.headlight.castShadow = false;
     this.carRoot.add(this.headlight, this.headlight.target);
     // Brake spill lights: likewise always present, dark until the brake is pressed.
+    // Off on low quality: a hidden light leaves every shader, a dark one would not.
     for (const light of this.brakeSpill) {
       light.castShadow = false;
+      light.visible = this.settings.quality !== 'low';
       this.carRoot.add(light);
     }
     this.worldData = buildWorld(mapId, this.settings);
@@ -386,6 +391,7 @@ export class DriveEngine {
     this.visual = createVehicleVisual(vehicle);
     this.carRoot.add(this.visual.root);
     this.initialModel = installGeneratedModel(this.visual, vehicle).then((ok) => {
+      this.brakeSpillLamps = null;
       this.applyStanceVisuals();
       return ok;
     });
@@ -411,6 +417,7 @@ export class DriveEngine {
     // The offscreen target does not get the canvas' MSAA, so ask for its own.
     this.motionBlur = new MotionBlur(this.renderer, antialias ? 4 : 0);
     this.lampBloom = new LampBloom(this.renderer);
+    this.lensDrops = new LensDrops(this.renderer);
     this.renderer.domElement.className = 'drive-canvas';
     this.renderer.domElement.setAttribute('aria-label', 'Sürüş alanı');
     this.renderer.domElement.addEventListener('wheel', this.onCameraWheel, { passive: false });
@@ -670,7 +677,10 @@ export class DriveEngine {
     this.carRoot.add(this.visual.root);
     this.resetCar();
     this.applyStanceVisuals();
-    void installGeneratedModel(this.visual, vehicle).finally(() => this.applyStanceVisuals());
+    void installGeneratedModel(this.visual, vehicle).finally(() => {
+      this.brakeSpillLamps = null;
+      this.applyStanceVisuals();
+    });
   }
 
   /** Switches map; resolves once a map that loads in the background is in place. */
@@ -756,6 +766,7 @@ export class DriveEngine {
     for (const texture of textures) this.renderer.initTexture(texture);
     this.motionBlur.compile();
     this.lampBloom.compile();
+    this.lensDrops.compile();
     this.renderScene();
   }
 
@@ -773,6 +784,7 @@ export class DriveEngine {
     }
     this.applyShadowExtent();
     this.skidMarks.visible = settings.effects;
+    for (const light of this.brakeSpill) light.visible = settings.quality !== 'low';
     this.tireSmoke.mesh.visible = settings.effects;
     if (!settings.effects) this.tireSmoke.clear();
     if (!settings.effects) this.clearSkids();
@@ -947,6 +959,10 @@ export class DriveEngine {
     this.brakeSpillScale = 0.08 + 0.92 * lighting.darkness;
     const state = this.environment.state;
     this.environment.rain.update(this.camera, this.environmentTime, state.rain, 1 - lighting.darkness * 0.75);
+    const dropsOn = this.drivingEnabled && this.settings.effects;
+    if (dropsOn || this.lensDrops.active) {
+      this.lensDrops.update(dt, dropsOn ? state.rain : 0, this.velocity.length(), 1 - lighting.darkness * 0.7, this.dropFocus);
+    }
     if (Math.abs(lighting.wetness - this.wetnessApplied) > 0.02) {
       applyWetness(this.worldData.root, lighting.wetness);
       this.wetnessApplied = lighting.wetness;
@@ -1229,12 +1245,12 @@ export class DriveEngine {
     for (const light of this.brakeSpill) light.intensity = spill;
   }
 
-  /** Puts each spill light just behind its brake lamp, so the glow starts at the lamp. */
+  /** Puts each spill light right at its detected brake lamp center. */
   private placeBrakeSpill(): void {
     this.brakeSpillLamps = this.visual.lights;
     const lamps = brakeLampCenters(this.visual, this.carRoot);
     this.brakeSpill.forEach((light, i) => {
-      if (lamps) light.position.copy(lamps[i]).add(BRAKE_SPILL_OFFSET);
+      if (lamps) light.position.copy(lamps[i]);
       else light.position.set((i === 0 ? 1 : -1) * this.vehicle.width * 0.36, this.vehicle.height * 0.62, -this.vehicle.length * 0.5 - BRAKE_SPILL_BEHIND);
     });
   }
@@ -1793,6 +1809,8 @@ export class DriveEngine {
     this.motionBlur.render(this.scene, this.camera, strength, this.blurFocus);
     // Lit brake lamps spread their light (only while one is lit).
     if (this.settings.effects && this.settings.quality !== 'low' && this.visual.lights.brakeLevel > 0.01) this.lampBloom.render(this.scene, this.camera, this.carRoot);
+    // Raindrops on the lens, over everything.
+    this.lensDrops.render();
   }
 
   private updateCamera(dt: number, snap = false): void {
@@ -1920,6 +1938,7 @@ export class DriveEngine {
     this.atmosphere.dispose();
     this.environment.dispose();
     this.lampBloom.dispose();
+    this.lensDrops.dispose();
     this.renderer.dispose();
     this.vehicleAudio.dispose();
     for (const remote of this.remoteVehicles.values()) disposeVehicleVisual(remote.visual);

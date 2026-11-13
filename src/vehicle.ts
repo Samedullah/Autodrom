@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { clone as cloneSkinnedModel } from 'three/addons/utils/SkeletonUtils.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { toFloatGeometry } from './geometry';
 import type { VehicleSpec } from './data';
 import { GLOW_LAYER } from './lampBloom';
 import { applyVarnishQuality, refineVehicleMaterials, setVarnishQualityDefault } from './vehicleMaterials';
@@ -212,12 +214,17 @@ function applyBrakeLevel(lights: VehicleLights, level: number): void {
 }
 
 const lampBox = new THREE.Box3();
-const lampCenter = new THREE.Vector3();
 const frameInverse = new THREE.Matrix4();
+const HALF_SPACES = [
+  new THREE.Box3(new THREE.Vector3(0, -Infinity, -Infinity), new THREE.Vector3(Infinity, Infinity, Infinity)),
+  new THREE.Box3(new THREE.Vector3(-Infinity, -Infinity, -Infinity), new THREE.Vector3(0, Infinity, Infinity)),
+];
 
 /**
- * Centres of the left and right brake lamps in `frame`'s local space (the car
- * body), from the lamp glow meshes. Null when the car has no detected lamps.
+ * Where the right (+X) and left brake lamps face backwards, in `frame`'s local
+ * space (the car body): the centre of each side's rearmost lamp face, so a
+ * lamp wrapping around the corner counts from its back. From the lamp glow
+ * meshes; null when the car has no detected lamps.
  */
 export function brakeLampCenters(visual: VehicleVisual, frame: THREE.Object3D): [THREE.Vector3, THREE.Vector3] | null {
   const meshes = visual.lights.glow?.meshes;
@@ -229,15 +236,15 @@ export function brakeLampCenters(visual: VehicleVisual, frame: THREE.Object3D): 
     const geometry = mesh.geometry;
     if (!geometry.boundingBox) geometry.computeBoundingBox();
     lampBox.copy(geometry.boundingBox!).applyMatrix4(mesh.matrixWorld).applyMatrix4(frameInverse);
-    // A lamp spanning the whole tail (light bar) counts for both sides.
-    if (lampBox.min.x < 0) sides[1].union(lampBox.clone().intersect(new THREE.Box3(new THREE.Vector3(-Infinity, -Infinity, -Infinity), new THREE.Vector3(0, Infinity, Infinity))));
-    if (lampBox.max.x > 0) sides[0].union(lampBox.clone().intersect(new THREE.Box3(new THREE.Vector3(0, -Infinity, -Infinity), new THREE.Vector3(Infinity, Infinity, Infinity))));
+    // A light bar across the whole tail counts for both sides.
+    sides.forEach((side, i) => side.union(lampBox.clone().intersect(HALF_SPACES[i])));
   }
-  if (sides[0].isEmpty() && sides[1].isEmpty()) return null;
+  const faces = sides.map((side) => side.isEmpty() ? null : side.getCenter(new THREE.Vector3()).setZ(side.min.z));
   // One side missing: mirror the other.
-  const left = sides[0].isEmpty() ? sides[1].getCenter(lampCenter).clone().setX(-lampCenter.x) : sides[0].getCenter(new THREE.Vector3());
-  const right = sides[1].isEmpty() ? left.clone().setX(-left.x) : sides[1].getCenter(new THREE.Vector3());
-  return [left, right];
+  const [right, left] = faces;
+  if (right && left) return [right, left];
+  const found = right ?? left;
+  return found ? [found.clone().setX(Math.abs(found.x)), found.clone().setX(-Math.abs(found.x))] : null;
 }
 
 /**
@@ -391,7 +398,8 @@ export interface WheelSuspension {
   }>;
 }
 
-const modelLoader = new GLTFLoader();
+// Models ship meshopt-compressed (EXT_meshopt_compression) with WebP textures.
+const modelLoader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
 interface CachedModel {
   promise: Promise<THREE.Object3D | null>;
   references: number;
@@ -423,37 +431,58 @@ function isAnimatedNode(object: THREE.Object3D): boolean {
     || FRONT_CALIPER_PATTERN.test(name) || REAR_CALIPER_PATTERN.test(name);
 }
 
-function toFloatAttribute(attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute): THREE.BufferAttribute {
-  const { count, itemSize } = attribute;
-  const array = new Float32Array(count * itemSize);
-  for (let i = 0; i < count; i += 1) {
-    for (let c = 0; c < itemSize; c += 1) array[i * itemSize + c] = attribute.getComponent(i, c);
-  }
-  return new THREE.BufferAttribute(array, itemSize);
+/**
+ * Rear lamp lenses stay separate meshes, so lamp detection still finds them by
+ * name. Not the "lamp on" toggle meshes: in some models (M4 GT3) those are the
+ * whole lamp, and merged they stay visible when the brake is off.
+ */
+function lampMergeRule(object: THREE.Object3D, keepParent: boolean): boolean {
+  const name = nodeLabel(object);
+  if (BRAKE_ON_NODE_PATTERN.test(name) || REVERSE_ON_NODE_PATTERN.test(name)) return false;
+  return keepParent || (REAR_LAMP_NAME_PATTERN.test(name) && !NOT_LAMP_PATTERN.test(name));
 }
 
 /**
  * Imported cars often arrive as hundreds of primitives, each a separate draw
  * call (twice with shadows). Bake every mesh that never moves relative to the
- * model into one mesh per material. Animated subtrees stay untouched so wheel
- * and steering pivots keep working.
+ * model into one mesh per material. Each wheel, steering pivot and caliper is
+ * a rigid part of its own: its meshes are merged inside it, so it still turns
+ * (some models carry ~2000 bolt and rim pieces in the wheels). Lamps keep
+ * their names for detection.
  */
 function mergeStaticMeshes(model: THREE.Object3D): void {
   model.updateMatrixWorld(true);
-  const modelInverse = model.matrixWorld.clone().invert();
+  const parts: THREE.Object3D[] = [model];
+  model.traverse((object) => { if (object !== model && isAnimatedNode(object)) parts.push(object); });
+  for (const part of parts) mergeRigidPart(part);
+
+  // Drop now-empty transform nodes so per-frame matrix updates stay cheap.
+  const prune = (object: THREE.Object3D): boolean => {
+    for (const child of [...object.children]) {
+      if (prune(child)) child.removeFromParent();
+    }
+    return object !== model && object.children.length === 0 && !(object as THREE.Mesh).isMesh
+      && !isAnimatedNode(object) && !(object as THREE.Bone).isBone;
+  };
+  prune(model);
+}
+
+/** Merges the meshes under `part` (down to nested animated parts) into `part`'s own space. */
+function mergeRigidPart(part: THREE.Object3D): void {
+  const partInverse = part.matrixWorld.clone().invert();
   const groups = new Map<string, { material: THREE.Material; geometries: THREE.BufferGeometry[]; sources: THREE.Mesh[] }>();
-  const visit = (object: THREE.Object3D): void => {
-    if (isAnimatedNode(object)) return;
+  const visit = (object: THREE.Object3D, lampParent: boolean): void => {
+    if (object !== part && isAnimatedNode(object)) return;
+    const lamp = lampMergeRule(object, lampParent);
     const mesh = object as THREE.Mesh;
-    const mergeable = mesh.isMesh && !(mesh as THREE.SkinnedMesh).isSkinnedMesh && !(mesh as THREE.InstancedMesh).isInstancedMesh
+    // The part itself is the pivot that moves; only its contents are baked.
+    const mergeable = object !== part && !lamp && mesh.isMesh && !(mesh as THREE.SkinnedMesh).isSkinnedMesh && !(mesh as THREE.InstancedMesh).isInstancedMesh
       && !Array.isArray(mesh.material) && Object.keys(mesh.geometry.morphAttributes).length === 0;
     if (mergeable) {
       const material = mesh.material as THREE.Material;
       const source = mesh.geometry;
-      const geometry = new THREE.BufferGeometry();
-      for (const [name, attribute] of Object.entries(source.attributes)) geometry.setAttribute(name, toFloatAttribute(attribute));
-      if (source.index) geometry.setIndex(Array.from(source.index.array));
-      const transform = modelInverse.clone().multiply(mesh.matrixWorld);
+      const geometry = toFloatGeometry(source);
+      const transform = partInverse.clone().multiply(mesh.matrixWorld);
       geometry.applyMatrix4(transform);
       if (transform.determinant() < 0) {
         // A mirrored transform reverses triangle winding once baked into vertices.
@@ -472,9 +501,9 @@ function mergeStaticMeshes(model: THREE.Object3D): void {
       group.sources.push(mesh);
       groups.set(key, group);
     }
-    for (const child of object.children) visit(child);
+    for (const child of object.children) visit(child, lamp);
   };
-  visit(model);
+  visit(part, false);
 
   const replacedGeometries = new Set<THREE.BufferGeometry>();
   for (const group of groups.values()) {
@@ -487,23 +516,13 @@ function mergeStaticMeshes(model: THREE.Object3D): void {
     if (!merged) continue;
     const mesh = new THREE.Mesh(merged, group.material);
     mesh.name = 'merged-static';
-    model.add(mesh);
+    part.add(mesh);
     for (const source of group.sources) {
       source.removeFromParent();
       replacedGeometries.add(source.geometry);
     }
   }
   for (const geometry of replacedGeometries) geometry.dispose();
-
-  // Drop now-empty transform nodes so per-frame matrix updates stay cheap.
-  const prune = (object: THREE.Object3D): boolean => {
-    for (const child of [...object.children]) {
-      if (prune(child)) child.removeFromParent();
-    }
-    return object !== model && object.children.length === 0 && !(object as THREE.Mesh).isMesh
-      && !isAnimatedNode(object) && !(object as THREE.Bone).isBone;
-  };
-  prune(model);
 }
 let manifestPromise: Promise<Set<string>> | null = null;
 

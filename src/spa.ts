@@ -1,9 +1,11 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { GameSettings } from './save';
 import { HeightGrid, WallGrid, forEachWorldTriangle } from './terrain';
 import { freezeStatic, type WorldData } from './world';
+import { toFloatGeometry } from './geometry';
 
 // Model-based racing circuits and mountain passes. Each track keeps its real
 // elevation profile: drivable ground comes from a height field built from its
@@ -101,7 +103,7 @@ function createTrackWorld(config: TrackWorldConfig, settings: GameSettings): Wor
     ready: Promise.resolve(),
     loadProgress: () => progress,
   };
-  loader ??= new GLTFLoader();
+  loader ??= new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   world.ready = loader.loadAsync(config.modelPath, (event) => {
     if (event.lengthComputable && event.total > 0) progress = 0.85 * event.loaded / event.total;
   }).then(async (gltf) => {
@@ -201,7 +203,7 @@ function batchStaticMeshes(root: THREE.Group, model: THREE.Object3D, settings: G
     const mesh = object as THREE.Mesh;
     if (!mesh.isMesh || Array.isArray(mesh.material) || !mesh.geometry) return;
     const geom = mesh.geometry;
-    const attrs = Object.keys(geom.attributes).sort().join(',');
+    const attrs = Object.entries(geom.attributes).map(([name, attribute]) => name + attribute.itemSize).sort().join(',');
     const indexed = geom.index !== null ? '1' : '0';
     const castsShadow = Boolean(mesh.userData.castsShadow);
     const key = `${mesh.material.uuid}|${castsShadow ? '1' : '0'}|${indexed}|${attrs}`;
@@ -210,7 +212,7 @@ function batchStaticMeshes(root: THREE.Group, model: THREE.Object3D, settings: G
       bucket = { material: mesh.material, castsShadow, geometries: [] };
       buckets.set(key, bucket);
     }
-    const worldGeom = geom.clone();
+    const worldGeom = toFloatGeometry(geom);
     worldGeom.applyMatrix4(mesh.matrixWorld);
     bucket.geometries.push(worldGeom);
   });
