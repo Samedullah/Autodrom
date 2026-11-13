@@ -154,6 +154,7 @@ const MIN_ROLLING_SPEED = 1.6;         // m/s
 const KINEMATIC_SPEED = 1.0;           // m/s
 const DYNAMIC_SPEED = 3.2;             // m/s
 const REFERENCE_WEIGHT = 1450;         // kg
+const REAR_STAGGER_PER_BIAS = 1.0;     // rear grip gain per unit of rearward weight bias (0.39 front -> +11%)
 const MASS_SENSITIVITY = 0.10;
 const SUBSTEP = 1 / 240;
 
@@ -239,6 +240,9 @@ function emptyTelemetry(): SingleTireTelemetry {
 export class Chassis {
   private massKg = REFERENCE_WEIGHT;
   private baseFrontWeightShare = 0.5;
+  // Rear tyre width relative to the front. Rear/mid-engine cars run wider rear tyres
+  // (staggered fitment) so the heavier rear axle is not the first to let go.
+  private rearStagger = 1;
   private frontWeightShare = 0.5;
   private frontArm = 1.3;     // m, centre of mass to front axle
   private rearArm = 1.3;      // m, centre of mass to rear axle
@@ -307,7 +311,7 @@ export class Chassis {
   /** Average rear friction multiplier relative to default Sport profile (for Drivetrain). */
   get rearFrictionMultiplier(): number {
     const base = (this.tires[2].frictionCoeff + this.tires[3].frictionCoeff) / (2 * TIRE_PROFILES.sport.rear.frictionCoeff);
-    return base * camberLongMultiplier(this.stance.rearCamberDeg);
+    return base * this.rearStagger * camberLongMultiplier(this.stance.rearCamberDeg);
   }
 
   get frontPeakSlipRatio(): number {
@@ -396,9 +400,16 @@ export class Chassis {
     const FRONT_BALANCE = 0.93;
     const frontPeakRad = 0.5 * (this.tires[0].peakSlipAngleDeg + this.tires[1].peakSlipAngleDeg) * DEG_TO_RAD;
     const frontMu = 0.5 * (this.tires[0].frictionCoeff + this.tires[1].frictionCoeff) * FRONT_BALANCE;
-    const rearMu = 0.5 * (this.tires[2].frictionCoeff + this.tires[3].frictionCoeff) * 0.95;
-    const maxLatAccel = this.baseGrip * Math.min(frontMu, rearMu);
-    return Math.atan(this.wheelbase * maxLatAccel / (v * v)) + frontPeakRad * 0.28;
+    const rearMu = 0.5 * (this.tires[2].frictionCoeff + this.tires[3].frictionCoeff) * 0.95 * this.rearStagger;
+    // Aero downforce raises the cornering limit at speed: the steering limit must allow
+    // the front tires to use it, otherwise high-downforce cars understeer artificially.
+    const aeroGain = 1 + 0.85 * aeroDownforceG(this.aeroProfile, v);
+    const maxLatAccel = this.baseGrip * Math.min(frontMu, rearMu) * aeroGain;
+    // Slip reserve: enough for the front tires to reach their peak slip angle even when the
+    // rear axle is below its limit (front-limited cornering). It shrinks above ~65 km/h, where
+    // yaw damping is weakest and a front axle at full peak would whip the car on direction changes.
+    const reserve = 0.40 - 0.16 * smoothstep(v, 18, 40);
+    return Math.atan(this.wheelbase * maxLatAccel / (v * v)) + frontPeakRad * reserve;
   }
 
   /**
@@ -485,7 +496,10 @@ export class Chassis {
         // sliding, track `frontTravel + steerInput * cmdSlip` so the front tires maintain
         // optimal peak turn-in bite (`~8°` slip angle) during initiation, and then damp
         // against excessive yawRate/bodySlip so holding turn-in widens the angle controllably.
-        const activeSlide = Math.max(bodySlip, this.output.rearSlide * 0.35);
+        // Body slip alone is not a slide: at speed, plain grip cornering already carries 4-6 deg of
+        // body slip. Only count it once the rear axle is really past peak, otherwise this branch
+        // adds inward lock mid-corner and turns ordinary limit cornering into a spin.
+        const activeSlide = Math.max(bodySlip * smoothstep(this.output.rearSlide, 0.02, 0.25), this.output.rearSlide * 0.35);
         const turnInSlideBlend = smoothstep(speed, 3.5, 8.0) * smoothstep(activeSlide, 0.08, 0.20);
         if (turnInSlideBlend > 0.01) {
           const spinRateInTurn = Math.max(0, yawRate * steerInput);
@@ -567,6 +581,7 @@ export class Chassis {
     const massFactor = clamp(Math.pow(REFERENCE_WEIGHT / this.massKg, MASS_SENSITIVITY), 0.91, 1.07);
     this.baseGrip = (GRIP_LATERAL_G + 0.24 * spec.handling) * GRAVITY * massFactor;
     this.brakeGrip = (1.10 + 0.25 * spec.handling) * GRAVITY;
+    this.rearStagger = 1 + REAR_STAGGER_PER_BIAS * Math.max(0, 0.5 - this.baseFrontWeightShare);
     this.diffLock = this.driveLayout === 'RWD' ? 0.62 : this.driveLayout === 'AWD' ? 0.45 : 0.18;
   }
 
@@ -810,10 +825,10 @@ export class Chassis {
         const normLongSlip = slipRatio / Math.max(tp.peakSlipRatio, 0.03);
 
         // Load sensitivity: effective friction drops smoothly as a single tire carries excess load.
-        // Baseline front/rear balance (0.94 front, 1.00 rear) reflects front roll-stiffness bias
+        // Baseline front/rear balance (0.97 front, 1.00 rear x staggered rear tyres) reflects front roll-stiffness bias
         // so steady-state cornering has progressive limit understeer unless longitudinal slip
         // (throttle wheelspin, handbrake, or trail-braking) consumes the rear friction budget.
-        const axleBalance = isFront ? 0.94 : 1.00;
+        const axleBalance = isFront ? 0.97 : this.rearStagger;
         const camberDeg = isFront ? this.stance.frontCamberDeg : this.stance.rearCamberDeg;
         const camberLat = camberLatMultiplier(camberDeg);
         const loadSens = clamp(1 - tp.loadSensitivity * (wLoad - 0.25) * 1.8, 0.72, 1.06);

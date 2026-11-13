@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { ECONOMY, MAP_LABELS, VEHICLES, type MapId, type VehicleSpec } from './data';
 import { IncomeClock } from './economy';
 import type { GameSettings } from './save';
-import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleMaterialQuality, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
+import { brakeLampCenters, createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleMaterialQuality, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
 import { VehicleAudio } from './vehicleAudio';
 import { TireSmoke } from './tireSmoke';
 import { MotionBlur } from './motionBlur';
@@ -82,6 +82,12 @@ const SMOKE_EMIT_INTERVAL = 0.03;
 const MODEL_LOAD_TIMEOUT_MS = 30000;
 // Headlight beam strength at full darkness (candela).
 const HEADLIGHT_INTENSITY = 1800;
+// Red light a lit brake lamp throws on the bumper, paint and road right behind it.
+const BRAKE_SPILL_INTENSITY = 1.6;
+const BRAKE_SPILL_RANGE = 3.5;
+// Spill light distance behind the lamp lens.
+const BRAKE_SPILL_BEHIND = 0.18;
+const BRAKE_SPILL_OFFSET = new THREE.Vector3(0, 0, -BRAKE_SPILL_BEHIND);
 // Seconds between re-bakes of the sky reflections while the light changes.
 const ENVIRONMENT_BAKE_INTERVAL = 1.2;
 // Engine braking in 1st gear (m/s²), falling off in higher gears. Rolling and
@@ -177,6 +183,15 @@ export class DriveEngine {
   private readonly sunOffset = SUN_OFFSET.clone();
   private readonly sunForward = new THREE.Vector3();
   private readonly headlight = new THREE.SpotLight('#fff3df', 0, 95, 0.52, 0.6, 1.4);
+  // One per rear lamp: the red spill on the car and road while braking.
+  private readonly brakeSpill = [
+    new THREE.PointLight('#ff1408', 0, BRAKE_SPILL_RANGE, 2),
+    new THREE.PointLight('#ff1408', 0, BRAKE_SPILL_RANGE, 2),
+  ];
+  // Spill strength by time of day: faint in sunlight, full at night.
+  private brakeSpillScale = 0.08;
+  /** Lamp set the spill lights were last placed at (placed again when the model changes). */
+  private brakeSpillLamps: VehicleVisual['lights'] | null = null;
   private fogBase = { near: 108, far: 950 };
   private bakedHour = 0;
   private bakeForced = true;
@@ -361,6 +376,11 @@ export class DriveEngine {
     // every material), dark by day.
     this.headlight.castShadow = false;
     this.carRoot.add(this.headlight, this.headlight.target);
+    // Brake spill lights: likewise always present, dark until the brake is pressed.
+    for (const light of this.brakeSpill) {
+      light.castShadow = false;
+      this.carRoot.add(light);
+    }
     this.worldData = buildWorld(mapId, this.settings);
     this.scene.add(this.worldData.root);
     this.visual = createVehicleVisual(vehicle);
@@ -924,6 +944,7 @@ export class DriveEngine {
     this.headlight.intensity = HEADLIGHT_INTENSITY * lighting.darkness;
     this.headlight.position.set(0, this.vehicle.height * 0.42, this.vehicle.length * 0.47);
     this.headlight.target.position.set(0, 0, this.vehicle.length * 0.47 + 28);
+    this.brakeSpillScale = 0.08 + 0.92 * lighting.darkness;
     const state = this.environment.state;
     this.environment.rain.update(this.camera, this.environmentTime, state.rain, 1 - lighting.darkness * 0.75);
     if (Math.abs(lighting.wetness - this.wetnessApplied) > 0.02) {
@@ -1202,7 +1223,20 @@ export class DriveEngine {
     // The wheels show the real steering angle, counter-steer included.
     setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel, this.stance);
     setVehicleSuspension(this.visual, this.suspensionTravel, this.stance);
-    setVehicleLights(this.visual, this.isDown('s'), this.gear === -1);
+    setVehicleLights(this.visual, this.isDown('s'), this.gear === -1, dt);
+    const spill = BRAKE_SPILL_INTENSITY * this.brakeSpillScale * this.visual.lights.brakeLevel;
+    if (spill > 0 && this.brakeSpillLamps !== this.visual.lights) this.placeBrakeSpill();
+    for (const light of this.brakeSpill) light.intensity = spill;
+  }
+
+  /** Puts each spill light just behind its brake lamp, so the glow starts at the lamp. */
+  private placeBrakeSpill(): void {
+    this.brakeSpillLamps = this.visual.lights;
+    const lamps = brakeLampCenters(this.visual, this.carRoot);
+    this.brakeSpill.forEach((light, i) => {
+      if (lamps) light.position.copy(lamps[i]).add(BRAKE_SPILL_OFFSET);
+      else light.position.set((i === 0 ? 1 : -1) * this.vehicle.width * 0.36, this.vehicle.height * 0.62, -this.vehicle.length * 0.5 - BRAKE_SPILL_BEHIND);
+    });
   }
 
   /**
@@ -1758,7 +1792,7 @@ export class DriveEngine {
     this.atmosphere.follow(this.camera);
     this.motionBlur.render(this.scene, this.camera, strength, this.blurFocus);
     // Lit brake lamps spread their light (only while one is lit).
-    if (this.settings.effects && this.settings.quality !== 'low' && this.visual.lights.brake) this.lampBloom.render(this.scene, this.camera, this.carRoot);
+    if (this.settings.effects && this.settings.quality !== 'low' && this.visual.lights.brakeLevel > 0.01) this.lampBloom.render(this.scene, this.camera, this.carRoot);
   }
 
   private updateCamera(dt: number, snap = false): void {

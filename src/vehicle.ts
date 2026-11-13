@@ -50,7 +50,11 @@ interface LampMaterial {
   emissive: THREE.Color;
   intensity: number;
   opacity: number;
+  roughness: number;
 }
+
+/** A "lamp on" mesh material (own copy), faded in by opacity. */
+interface LampNodeMaterial { material: THREE.Material; opacity: number }
 
 /** Brake and reverse lamps of the car currently shown (model or procedural). */
 export interface VehicleLights {
@@ -59,10 +63,14 @@ export interface VehicleLights {
   /** Separate "lamp on" meshes some models ship: shown only while braking / reversing. */
   brakeNodes: THREE.Object3D[];
   reverseNodes: THREE.Object3D[];
+  /** Own copies of the brakeNodes' materials, so they fade without touching other cars. */
+  brakeNodeMaterials: LampNodeMaterial[];
   /** Soft red halo around each lit lamp and on the road behind; shown while braking. */
   /** Copies of the lit lamp meshes on the bloom layer: the glow spreads from the lamp itself. */
   glow: LampGlow | null;
   brake: boolean;
+  /** Shown brightness 0..1: it follows `brake` like a filament warming up and cooling down. */
+  brakeLevel: number;
   reverse: boolean;
 }
 
@@ -70,22 +78,30 @@ export interface VehicleLights {
 // red with any green towards orange. The lens itself turns red too, so a
 // whitish lens does not shine back the daylight in white. Lenses with a
 // texture glow through it, so the lamp's own pattern shows.
-const BRAKE_GLOW = new THREE.Color(0.9, 0, 0);
-const BRAKE_GLOW_INTENSITY = 1.4;
-const BRAKE_GLOW_INTENSITY_TEXTURED = 2;
-const LIT_LENS_TINT = new THREE.Color(1, 0.15, 0.12);
+// ACES leaks bright red into green, so the glow stays below ~1 (linear) to read
+// as a deep, dark red instead of orange; a touch of blue offsets the leak.
+const BRAKE_GLOW = new THREE.Color(0.5, 0, 0.012);
+const BRAKE_GLOW_INTENSITY = 1.7;
+const BRAKE_GLOW_INTENSITY_TEXTURED = 2.3;
+const LIT_LENS_TINT = new THREE.Color(0.8, 0.03, 0.04);
 // Colour of the light the lamp spreads (bloom layer), linear and above 1 so the blur keeps it bright.
-const LAMP_BLOOM_COLOR = new THREE.Color(2.6, 0.02, 0);
-// A lit lens fills with light but its housing still shows through.
-const BRAKE_LENS_EXTRA_OPACITY = 0.35;
-const BRAKE_LENS_MAX_OPACITY = 0.85;
+const LAMP_BLOOM_COLOR = new THREE.Color(1.7, 0, 0.02);
+// A lit lens fills with light but stays see-through: the housing and its depth show behind it.
+const BRAKE_LENS_EXTRA_OPACITY = 0.15;
+const BRAKE_LENS_MAX_OPACITY = 0.6;
+// Lit lenses are glossy glass, not a matte plastic face.
+const LIT_LENS_ROUGHNESS = 0.14;
+// Bulb-like response: ~0.15 s to full brightness, a bit slower to die out.
+const BRAKE_RISE_TIME = 0.05;
+const BRAKE_FALL_TIME = 0.11;
+const scratchColor = new THREE.Color();
 
 function lampMaterial(material: THREE.MeshStandardMaterial): LampMaterial {
-  return { material, color: material.color.clone(), emissive: material.emissive.clone(), intensity: material.emissiveIntensity, opacity: material.opacity };
+  return { material, color: material.color.clone(), emissive: material.emissive.clone(), intensity: material.emissiveIntensity, opacity: material.opacity, roughness: material.roughness };
 }
 
 function emptyLights(): VehicleLights {
-  return { brakeLamps: [], brakeNodes: [], reverseNodes: [], glow: null, brake: false, reverse: false };
+  return { brakeLamps: [], brakeNodes: [], reverseNodes: [], brakeNodeMaterials: [], glow: null, brake: false, brakeLevel: 0, reverse: false };
 }
 
 // --- Contact shadow: a soft dark patch right under the car. The sun's shadow
@@ -169,28 +185,77 @@ function disposeBrakeGlow(lights: VehicleLights): void {
   lights.glow = null;
 }
 
-export function setVehicleLights(visual: VehicleVisual, brake: boolean, reverse: boolean): void {
-  const lights = visual.lights;
-  if (lights.brake !== brake) {
-    lights.brake = brake;
-    for (const lamp of lights.brakeLamps) {
-      const material = lamp.material;
-      if (brake) {
-        material.color.copy(lamp.color).multiply(LIT_LENS_TINT);
-        material.emissive.copy(BRAKE_GLOW);
-        material.emissiveIntensity = material.emissiveMap ? BRAKE_GLOW_INTENSITY_TEXTURED : BRAKE_GLOW_INTENSITY;
-        if (material.transparent) {
-          material.opacity = Math.max(lamp.opacity, Math.min(BRAKE_LENS_MAX_OPACITY, lamp.opacity + BRAKE_LENS_EXTRA_OPACITY));
-        }
-      } else {
-        material.color.copy(lamp.color);
-        material.emissive.copy(lamp.emissive);
-        material.emissiveIntensity = lamp.intensity;
-        material.opacity = lamp.opacity;
-      }
+/** Shows the brake lamps at `level` (0 dark .. 1 fully lit). */
+function applyBrakeLevel(lights: VehicleLights, level: number): void {
+  lights.brakeLevel = level;
+  // Perceived brightness of a warming bulb: slow start, quick finish.
+  const glow = level * level * (3 - 2 * level);
+  for (const lamp of lights.brakeLamps) {
+    const material = lamp.material;
+    material.color.copy(lamp.color).lerp(scratchColor.copy(lamp.color).multiply(LIT_LENS_TINT), level);
+    material.emissive.copy(lamp.emissive).lerp(BRAKE_GLOW, level);
+    const litIntensity = material.emissiveMap ? BRAKE_GLOW_INTENSITY_TEXTURED : BRAKE_GLOW_INTENSITY;
+    material.emissiveIntensity = lamp.intensity + (litIntensity - lamp.intensity) * glow;
+    material.roughness = lamp.roughness + (Math.min(lamp.roughness, LIT_LENS_ROUGHNESS) - lamp.roughness) * level;
+    if (material.transparent) {
+      const litOpacity = Math.max(lamp.opacity, Math.min(BRAKE_LENS_MAX_OPACITY, lamp.opacity + BRAKE_LENS_EXTRA_OPACITY));
+      material.opacity = lamp.opacity + (litOpacity - lamp.opacity) * level;
     }
-    for (const node of lights.brakeNodes) node.visible = brake;
-    if (lights.glow) for (const mesh of lights.glow.meshes) mesh.visible = brake;
+  }
+  const lit = level > 0.01;
+  for (const node of lights.brakeNodes) node.visible = lit;
+  for (const entry of lights.brakeNodeMaterials) entry.material.opacity = entry.opacity * glow;
+  if (lights.glow) {
+    for (const mesh of lights.glow.meshes) mesh.visible = lit;
+    (lights.glow.material as THREE.MeshBasicMaterial).color.copy(LAMP_BLOOM_COLOR).multiplyScalar(glow);
+  }
+}
+
+const lampBox = new THREE.Box3();
+const lampCenter = new THREE.Vector3();
+const frameInverse = new THREE.Matrix4();
+
+/**
+ * Centres of the left and right brake lamps in `frame`'s local space (the car
+ * body), from the lamp glow meshes. Null when the car has no detected lamps.
+ */
+export function brakeLampCenters(visual: VehicleVisual, frame: THREE.Object3D): [THREE.Vector3, THREE.Vector3] | null {
+  const meshes = visual.lights.glow?.meshes;
+  if (!meshes?.length) return null;
+  frame.updateWorldMatrix(true, true);
+  frameInverse.copy(frame.matrixWorld).invert();
+  const sides = [new THREE.Box3(), new THREE.Box3()];
+  for (const mesh of meshes) {
+    const geometry = mesh.geometry;
+    if (!geometry.boundingBox) geometry.computeBoundingBox();
+    lampBox.copy(geometry.boundingBox!).applyMatrix4(mesh.matrixWorld).applyMatrix4(frameInverse);
+    // A lamp spanning the whole tail (light bar) counts for both sides.
+    if (lampBox.min.x < 0) sides[1].union(lampBox.clone().intersect(new THREE.Box3(new THREE.Vector3(-Infinity, -Infinity, -Infinity), new THREE.Vector3(0, Infinity, Infinity))));
+    if (lampBox.max.x > 0) sides[0].union(lampBox.clone().intersect(new THREE.Box3(new THREE.Vector3(0, -Infinity, -Infinity), new THREE.Vector3(Infinity, Infinity, Infinity))));
+  }
+  if (sides[0].isEmpty() && sides[1].isEmpty()) return null;
+  // One side missing: mirror the other.
+  const left = sides[0].isEmpty() ? sides[1].getCenter(lampCenter).clone().setX(-lampCenter.x) : sides[0].getCenter(new THREE.Vector3());
+  const right = sides[1].isEmpty() ? left.clone().setX(-left.x) : sides[1].getCenter(new THREE.Vector3());
+  return [left, right];
+}
+
+/**
+ * Sets the brake and reverse lamps. With `dt` the brake lamps fade towards the new
+ * state like a bulb; without it (resets, shader warm-up) they switch at once.
+ */
+export function setVehicleLights(visual: VehicleVisual, brake: boolean, reverse: boolean, dt?: number): void {
+  const lights = visual.lights;
+  lights.brake = brake;
+  const target = brake ? 1 : 0;
+  if (lights.brakeLevel !== target) {
+    let level = target;
+    if (dt !== undefined) {
+      const time = brake ? BRAKE_RISE_TIME : BRAKE_FALL_TIME;
+      level = lights.brakeLevel + (target - lights.brakeLevel) * (1 - Math.exp(-dt / time));
+      if (Math.abs(target - level) < 0.004) level = target;
+    }
+    applyBrakeLevel(lights, level);
   }
   if (lights.reverse !== reverse) {
     lights.reverse = reverse;
@@ -232,6 +297,22 @@ function findModelLights(instance: THREE.Object3D, root: THREE.Object3D, spec: V
     const lamps: THREE.Mesh[] = [];
     for (const node of lights.brakeNodes) node.traverse((child) => { if ((child as THREE.Mesh).isMesh) lamps.push(child as THREE.Mesh); });
     lights.glow = createLampGlow(lamps);
+    // Own copies, transparent from the start (no shader recompile on first brake), so the
+    // lit meshes fade in by opacity without touching other cars that share the model.
+    const copies = new Map<THREE.Material, THREE.Material>();
+    const swap = (material: THREE.Material): THREE.Material => {
+      let copy = copies.get(material);
+      if (!copy) {
+        copy = material.clone();
+        lights.brakeNodeMaterials.push({ material: copy, opacity: copy.opacity });
+        copy.transparent = true;
+        copy.opacity = 0;
+        copies.set(material, copy);
+        owned.push(copy);
+      }
+      return copy;
+    };
+    for (const mesh of lamps) mesh.material = Array.isArray(mesh.material) ? mesh.material.map(swap) : swap(mesh.material);
     for (const node of [...lights.brakeNodes, ...lights.reverseNodes]) node.visible = false;
     return lights;
   }
@@ -506,7 +587,7 @@ export function createVehicleVisual(spec: VehicleSpec): VehicleVisual {
     color: '#253b42', roughness: 0.16, metalness: 0.48, transparent: true, opacity: 0.9,
   });
   const headlight = new THREE.MeshStandardMaterial({ color: '#e8f8de', emissive: '#bde8ca', emissiveIntensity: 1.5 });
-  const taillight = new THREE.MeshStandardMaterial({ color: '#e94742', emissive: '#c21e1b', emissiveIntensity: 1.1 });
+  const taillight = new THREE.MeshStandardMaterial({ color: '#8e1015', emissive: '#4a0306', emissiveIntensity: 0.7, roughness: 0.18 });
   const length = spec.length;
   const width = spec.width;
   const h = spec.height;

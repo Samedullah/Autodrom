@@ -1,0 +1,350 @@
+{
+  "android/app/build.gradle": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.00618,
+    "ast_hash": "4665125a01f629b4fda4e9cfe92c6bc5",
+    "semantic_hash": "4665125a01f629b4fda4e9cfe92c6bc5"
+  },
+  "android/app/capacitor.build.gradle": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006189,
+    "ast_hash": "b863e425fbde80251bd3c68ac8ccba02",
+    "semantic_hash": "b863e425fbde80251bd3c68ac8ccba02"
+  },
+  "android/app/src/androidTest/java/com/getcapacitor/myapp/ExampleInstrumentedTest.java": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.0061939,
+    "ast_hash": "fbaf7cc870c663eb52dcf218531c439d",
+    "semantic_hash": "fbaf7cc870c663eb52dcf218531c439d"
+  },
+  "android/app/src/main/java/com/autodrom/game/MainActivity.java": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.0061991,
+    "ast_hash": "689ce9f94bdd06f03fa70b27532c4b95",
+    "semantic_hash": "689ce9f94bdd06f03fa70b27532c4b95"
+  },
+  "android/app/src/test/java/com/getcapacitor/myapp/ExampleUnitTest.java": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006203,
+    "ast_hash": "e91b4501c14da821682fa5c26a16d616",
+    "semantic_hash": "e91b4501c14da821682fa5c26a16d616"
+  },
+  "android/build.gradle": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006207,
+    "ast_hash": "682315a426653617c6a74fc12bef55b6",
+    "semantic_hash": "682315a426653617c6a74fc12bef55b6"
+  },
+  "android/capacitor.settings.gradle": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006211,
+    "ast_hash": "455ebb7f9fe84a6974da6bdae43097c2",
+    "semantic_hash": "455ebb7f9fe84a6974da6bdae43097c2"
+  },
+  "android/gradlew": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.0062149,
+    "ast_hash": "794669d78aef1dd5c7d889ef618b311a",
+    "semantic_hash": "794669d78aef1dd5c7d889ef618b311a"
+  },
+  "android/settings.gradle": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006219,
+    "ast_hash": "f6cd925b3f859e23c3d819fe2459e0e4",
+    "semantic_hash": "f6cd925b3f859e23c3d819fe2459e0e4"
+  },
+  "android/variables.gradle": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.0062232,
+    "ast_hash": "4b3fce8ea2a515a9d2e47e74757172ec",
+    "semantic_hash": "4b3fce8ea2a515a9d2e47e74757172ec"
+  },
+  "capacitor.config.ts": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006227,
+    "ast_hash": "fa26eec06792cf1d55b59093bca7814c",
+    "semantic_hash": "fa26eec06792cf1d55b59093bca7814c"
+  },
+  "package.json": {
+    "mtime": 1794408246.8960185,
+    "seen": 1794552350.9582531,
+    "ast_hash": "428697300f84b21284457c7a5e6354e8",
+    "semantic_hash": "428697300f84b21284457c7a5e6354e8"
+  },
+  "public/assets/models/manifest.json": {
+    "mtime": 1794408247.4206712,
+    "seen": 1794552350.9582589,
+    "ast_hash": "cd7223006c372a50c33828f8c584c0c3",
+    "semantic_hash": "cd7223006c372a50c33828f8c584c0c3"
+  },
+  "server/dev.js": {
+    "mtime": 1793973765.1766982,
+    "seen": 1794552350.958264,
+    "ast_hash": "73b83ccd99dce47028ad1acd1333318c",
+    "semantic_hash": "73b83ccd99dce47028ad1acd1333318c"
+  },
+  "server/index.js": {
+    "mtime": 1793973765.1773424,
+    "seen": 1794377752.160259,
+    "ast_hash": "4bb26d5f7ef273e5568de68c43cc1123",
+    "semantic_hash": "4bb26d5f7ef273e5568de68c43cc1123"
+  },
+  "src/data.ts": {
+    "mtime": 1794408476.5315287,
+    "seen": 1794552350.958652,
+    "ast_hash": "bd3845445ed791bb1719a4be1cabe4e9",
+    "semantic_hash": "bd3845445ed791bb1719a4be1cabe4e9"
+  },
+  "src/economy.ts": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.00625,
+    "ast_hash": "ed9229417de514b962e9a59d44b494ff",
+    "semantic_hash": "ed9229417de514b962e9a59d44b494ff"
+  },
+  "src/engine 1.ts": {
+    "mtime": 1794408476.5336924,
+    "seen": 1794552350.959113,
+    "ast_hash": "dea76f0e42836eba73c4702157de0af0",
+    "semantic_hash": "dea76f0e42836eba73c4702157de0af0"
+  },
+  "src/engine.ts": {
+    "mtime": 1794408476.5352762,
+    "seen": 1794552350.959119,
+    "ast_hash": "4f9b38dbceb07c1416aa087923adda89",
+    "semantic_hash": "4f9b38dbceb07c1416aa087923adda89"
+  },
+  "src/main.ts": {
+    "mtime": 1794408476.5367644,
+    "seen": 1794552350.9593222,
+    "ast_hash": "679185fa6a16e7015527540adedc79f2",
+    "semantic_hash": "679185fa6a16e7015527540adedc79f2"
+  },
+  "src/multiplayer.ts": {
+    "mtime": 1793973765.1842785,
+    "seen": 1794377752.160459,
+    "ast_hash": "7988acccde0b88a4fd0470096bc8524c",
+    "semantic_hash": "7988acccde0b88a4fd0470096bc8524c"
+  },
+  "src/save.ts": {
+    "mtime": 1794408247.4316745,
+    "seen": 1794552350.95967,
+    "ast_hash": "77496ace4d91595fd55bf4085fd6b637",
+    "semantic_hash": "77496ace4d91595fd55bf4085fd6b637"
+  },
+  "src/ui.ts": {
+    "mtime": 1794408476.5404322,
+    "seen": 1794552350.960313,
+    "ast_hash": "e72c68825024d792273426dc78292c69",
+    "semantic_hash": "e72c68825024d792273426dc78292c69"
+  },
+  "src/vehicle.ts": {
+    "mtime": 1794408476.541703,
+    "seen": 1794552350.96032,
+    "ast_hash": "e4a8567e197e4738e4c8151bfe19ff1e",
+    "semantic_hash": "e4a8567e197e4738e4c8151bfe19ff1e"
+  },
+  "src/vehicleAudio.ts": {
+    "mtime": 1793973765.1916983,
+    "seen": 1794377752.160488,
+    "ast_hash": "30c0787b1650aa7560c3d1516a060e83",
+    "semantic_hash": "30c0787b1650aa7560c3d1516a060e83"
+  },
+  "src/world.ts": {
+    "mtime": 1794408476.5425746,
+    "seen": 1794552350.9608471,
+    "ast_hash": "eeae00ba7f11ccf097b0b2475401e8f8",
+    "semantic_hash": "eeae00ba7f11ccf097b0b2475401e8f8"
+  },
+  "tsconfig.json": {
+    "mtime": 1794408476.5431921,
+    "seen": 1794552350.960851,
+    "ast_hash": "a4719eb53a31226d76ad4f94f57fabec",
+    "semantic_hash": "a4719eb53a31226d76ad4f94f57fabec"
+  },
+  "vite.config.ts": {
+    "mtime": 1793973764.2711508,
+    "seen": 1794377752.160652,
+    "ast_hash": "d9cfb2c7e62cf3ded7bed6196ce41027",
+    "semantic_hash": "d9cfb2c7e62cf3ded7bed6196ce41027"
+  },
+  "MULTIPLAYER.md": {
+    "mtime": 1793973764.0450544,
+    "seen": 1794377752.160661,
+    "ast_hash": "2ffa541aa9daca38af3d60f2586457fc",
+    "semantic_hash": "2ffa541aa9daca38af3d60f2586457fc"
+  },
+  "README.md": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.0062988,
+    "ast_hash": "f736e448ed3c01e9c2abfdcc7b0b49b9",
+    "semantic_hash": "f736e448ed3c01e9c2abfdcc7b0b49b9"
+  },
+  "TRIPO-PLAN.md": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006303,
+    "ast_hash": "5440f810e292738b4860d165cdc85e93",
+    "semantic_hash": "5440f810e292738b4860d165cdc85e93"
+  },
+  "index.html": {
+    "mtime": 1793973764.4127588,
+    "seen": 1794377752.160935,
+    "ast_hash": "16b3e5f5dddb3cb0906e05e073876480",
+    "semantic_hash": "16b3e5f5dddb3cb0906e05e073876480"
+  },
+  "public/assets/audio/cars/default/README.md": {
+    "mtime": 1792656935.8907475,
+    "seen": 1793883908.00631,
+    "ast_hash": "a2aa42b27000ac2f09b09b9b2bd482d1",
+    "semantic_hash": "a2aa42b27000ac2f09b09b9b2bd482d1"
+  },
+  "public/assets/models/ATTRIBUTION.md": {
+    "mtime": 1793973764.4135845,
+    "seen": 1794377752.161152,
+    "ast_hash": "0ccb4dcc9691d947a374dd40659e141a",
+    "semantic_hash": "0ccb4dcc9691d947a374dd40659e141a"
+  },
+  "public/assets/models/README.md": {
+    "mtime": 1792530543.0,
+    "seen": 1793883908.006318,
+    "ast_hash": "227143e3995dddc2455aeb04e038ec41",
+    "semantic_hash": "227143e3995dddc2455aeb04e038ec41"
+  },
+  "public/assets/models/VEHICLE-RESEARCH.md": {
+    "mtime": 1792586507.4653533,
+    "seen": 1793883908.006322,
+    "ast_hash": "ee375537f504e73a46b10484c8ec3562",
+    "semantic_hash": "ee375537f504e73a46b10484c8ec3562"
+  },
+  "src/atmosphere.ts": {
+    "mtime": 1793976013.9248996,
+    "seen": 1794377752.160264,
+    "ast_hash": "d2488bb7944f5c00c2cd7df7c8ef32a5",
+    "semantic_hash": "d2488bb7944f5c00c2cd7df7c8ef32a5"
+  },
+  "src/debugPanel.ts": {
+    "mtime": 1793976619.85255,
+    "seen": 1794377752.160272,
+    "ast_hash": "71bf3516d690e2546d71ad7555c697c2",
+    "semantic_hash": "71bf3516d690e2546d71ad7555c697c2"
+  },
+  "src/drivetrain.ts": {
+    "mtime": 1794408476.532451,
+    "seen": 1794552350.958814,
+    "ast_hash": "df56a30f300509ef1cf9b3bea99338b5",
+    "semantic_hash": "df56a30f300509ef1cf9b3bea99338b5"
+  },
+  "src/environment.ts": {
+    "mtime": 1793976619.8441696,
+    "seen": 1794377752.1604428,
+    "ast_hash": "bd9dfab835557e47518efad4db95b7b1",
+    "semantic_hash": "bd9dfab835557e47518efad4db95b7b1"
+  },
+  "src/lampBloom.ts": {
+    "mtime": 1794408476.5360239,
+    "seen": 1794552350.959315,
+    "ast_hash": "f821c5e3bd30b3b2bdb9937f48e48375",
+    "semantic_hash": "f821c5e3bd30b3b2bdb9937f48e48375"
+  },
+  "src/motionBlur.ts": {
+    "mtime": 1794408476.5374231,
+    "seen": 1794552350.9593291,
+    "ast_hash": "b467c6de3398c9df84dae6359717bb34",
+    "semantic_hash": "b467c6de3398c9df84dae6359717bb34"
+  },
+  "src/spa.ts": {
+    "mtime": 1794408476.5381234,
+    "seen": 1794552350.9596758,
+    "ast_hash": "b030e074d5e7cb58781156ad20eff9ce",
+    "semantic_hash": "b030e074d5e7cb58781156ad20eff9ce"
+  },
+  "src/terrain.ts": {
+    "mtime": 1793973765.187987,
+    "seen": 1794377752.160473,
+    "ast_hash": "592f974ee825605f083a433bf31ad412",
+    "semantic_hash": "592f974ee825605f083a433bf31ad412"
+  },
+  "src/tireSmoke.ts": {
+    "mtime": 1793973765.1885288,
+    "seen": 1794377752.160477,
+    "ast_hash": "db572ddd922cdc4295651b858261b3c0",
+    "semantic_hash": "db572ddd922cdc4295651b858261b3c0"
+  },
+  "src/vehicleMaterials.ts": {
+    "mtime": 1793975077.336714,
+    "seen": 1794377752.1604989,
+    "ast_hash": "db931fd6662fb13f3a5ed3a59d0aec8e",
+    "semantic_hash": "db931fd6662fb13f3a5ed3a59d0aec8e"
+  },
+  "src/vite-env.d.ts": {
+    "mtime": 1793973764.2694123,
+    "seen": 1794552350.960841,
+    "ast_hash": "0352474ba2918efe13895edbc3780d94",
+    "semantic_hash": "0352474ba2918efe13895edbc3780d94"
+  },
+  "CLAUDE.md": {
+    "mtime": 1794380011.3456018,
+    "seen": 1794552350.961279,
+    "ast_hash": "2e99c112f9172cb0fd5851b0b6ed3fae",
+    "semantic_hash": "2e99c112f9172cb0fd5851b0b6ed3fae"
+  },
+  "android/app/src/main/res/drawable/splash.png": {
+    "mtime": 1792530543.0,
+    "seen": 1794377752.1615171,
+    "ast_hash": "acc976d4a36479233371a53021525c0c",
+    "semantic_hash": "acc976d4a36479233371a53021525c0c"
+  },
+  "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png": {
+    "mtime": 1792530543.0,
+    "seen": 1794377752.161522,
+    "ast_hash": "9e029293ab1ae8e3a6a7b7d0b7177e46",
+    "semantic_hash": "9e029293ab1ae8e3a6a7b7d0b7177e46"
+  },
+  "public/assets/audio/cars/default/engine-idle.ogg": {
+    "mtime": 1792656411.1975145,
+    "seen": 1794377752.161526,
+    "ast_hash": "a26f72f947c69bd4f6ddc10391b27acb",
+    "semantic_hash": "a26f72f947c69bd4f6ddc10391b27acb"
+  },
+  "public/assets/audio/cars/default/engine-load.ogg": {
+    "mtime": 1792656344.0194914,
+    "seen": 1794377752.16153,
+    "ast_hash": "52f3671d340586c45cd3333be8bd85d8",
+    "semantic_hash": "52f3671d340586c45cd3333be8bd85d8"
+  },
+  "src/cameraMotion.ts": {
+    "mtime": 1794408247.4212148,
+    "seen": 1794552350.958643,
+    "ast_hash": "2b44391baf09d8b66a55a85b2e3ee818",
+    "semantic_hash": "2b44391baf09d8b66a55a85b2e3ee818"
+  },
+  "src/chassis.ts": {
+    "mtime": 1794466298.6472325,
+    "seen": 1794552350.958648,
+    "ast_hash": "858e40f3007917919171cdc3b1018f18",
+    "semantic_hash": "858e40f3007917919171cdc3b1018f18"
+  },
+  "src/stancePanel.ts": {
+    "mtime": 1794408247.4333036,
+    "seen": 1794552350.959681,
+    "ast_hash": "92f4215648f6d9a1bbf40bd02ef31b72",
+    "semantic_hash": "92f4215648f6d9a1bbf40bd02ef31b72"
+  },
+  "src/tireDebugPanel.ts": {
+    "mtime": 1794408247.4358633,
+    "seen": 1794552350.959975,
+    "ast_hash": "ebcf465fb26ed0ab891e0a5d46aace4d",
+    "semantic_hash": "ebcf465fb26ed0ab891e0a5d46aace4d"
+  },
+  "android/app/src/main/res/drawable-land-xxxhdpi/splash.png": {
+    "mtime": 1792530543.0,
+    "seen": 1794552350.96129,
+    "ast_hash": "055a69553b16b0bf5f72094a2e459fc7",
+    "semantic_hash": "055a69553b16b0bf5f72094a2e459fc7"
+  },
+  "android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png": {
+    "mtime": 1792530543.0,
+    "seen": 1794552350.9612968,
+    "ast_hash": "a3285eeaedda8201f04e7737b9df8421",
+    "semantic_hash": "a3285eeaedda8201f04e7737b9df8421"
+  }
+}

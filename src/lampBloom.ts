@@ -11,11 +11,18 @@ import * as THREE from 'three';
 export const GLOW_LAYER = 3;
 
 const DOWNSCALE = 4;
-// Widening radii: a soft core plus a short falloff. Wider, the halo washed
-// the whole rear of the car red.
-const BLUR_PASSES = [0.8, 1.4];
+// Light scattering in a lens or the eye: a bright, tight core with a tail that
+// fades out smoothly and reaches far. Each level blurs further (a few small
+// passes, so wide blurs stay smooth without banding) and is summed with a
+// falling weight; one single blur reads as a flat, artificial blob instead.
+const BLOOM_LEVELS = [
+  { passes: 1, radius: 1.0, weight: 0.52 },
+  { passes: 2, radius: 1.3, weight: 0.26 },
+  { passes: 3, radius: 1.6, weight: 0.14 },
+  { passes: 3, radius: 1.8, weight: 0.08 },
+];
 // Glow added on top of the frame.
-const GLOW_STRENGTH = 1.1;
+const GLOW_STRENGTH = 1.7;
 
 const quadVertex = /* glsl */ `
   varying vec2 vUv;
@@ -39,6 +46,15 @@ const blurFragment = /* glsl */ `
   }
 `;
 
+const accumulateFragment = /* glsl */ `
+  uniform sampler2D source;
+  uniform float weight;
+  varying vec2 vUv;
+  void main() {
+    gl_FragColor = vec4(texture2D(source, vUv).rgb * weight, 1.0);
+  }
+`;
+
 const compositeFragment = /* glsl */ `
   uniform sampler2D glow;
   uniform float strength;
@@ -52,7 +68,10 @@ const compositeFragment = /* glsl */ `
 
 export class LampBloom {
   private readonly targets: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget];
+  /** Sum of the bloom levels. */
+  private readonly accum: THREE.WebGLRenderTarget;
   private readonly blur: THREE.ShaderMaterial;
+  private readonly accumulate: THREE.ShaderMaterial;
   private readonly composite: THREE.ShaderMaterial;
   private readonly quad: THREE.Mesh;
   private readonly quadScene = new THREE.Scene();
@@ -64,6 +83,16 @@ export class LampBloom {
   constructor(private readonly renderer: THREE.WebGLRenderer) {
     const options = { type: THREE.HalfFloatType, depthBuffer: true } as const;
     this.targets = [new THREE.WebGLRenderTarget(1, 1, options), new THREE.WebGLRenderTarget(1, 1, options)];
+    this.accum = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
+    this.accumulate = new THREE.ShaderMaterial({
+      uniforms: { source: { value: null }, weight: { value: 1 } },
+      vertexShader: quadVertex,
+      fragmentShader: accumulateFragment,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
     this.blur = new THREE.ShaderMaterial({
       uniforms: { source: { value: null }, step: { value: new THREE.Vector2() } },
       vertexShader: quadVertex,
@@ -72,7 +101,7 @@ export class LampBloom {
       depthWrite: false,
     });
     this.composite = new THREE.ShaderMaterial({
-      uniforms: { glow: { value: this.targets[0].texture }, strength: { value: GLOW_STRENGTH } },
+      uniforms: { glow: { value: this.accum.texture }, strength: { value: GLOW_STRENGTH } },
       vertexShader: quadVertex,
       fragmentShader: compositeFragment,
       blending: THREE.AdditiveBlending,
@@ -91,6 +120,7 @@ export class LampBloom {
     const width = Math.max(1, Math.round(this.size.x / DOWNSCALE));
     const height = Math.max(1, Math.round(this.size.y / DOWNSCALE));
     for (const target of this.targets) target.setSize(width, height);
+    this.accum.setSize(width, height);
   }
 
   /**
@@ -143,17 +173,30 @@ export class LampBloom {
     renderer.shadowMap.autoUpdate = shadowAutoUpdate;
     renderer.setClearColor(this.clearColor, clearAlpha);
 
-    this.quad.material = this.blur;
-    for (const radius of BLUR_PASSES) {
-      this.blur.uniforms.source.value = a.texture;
-      this.blur.uniforms.step.value.set(radius / a.width, 0);
-      renderer.setRenderTarget(b);
-      renderer.render(this.quadScene, this.quadCamera);
-      this.blur.uniforms.source.value = b.texture;
-      this.blur.uniforms.step.value.set(0, radius / a.height);
-      renderer.setRenderTarget(a);
+    renderer.setRenderTarget(this.accum);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.setClearColor(this.clearColor, clearAlpha);
+    renderer.autoClear = false;
+    for (const level of BLOOM_LEVELS) {
+      this.quad.material = this.blur;
+      for (let pass = 0; pass < level.passes; pass += 1) {
+        this.blur.uniforms.source.value = a.texture;
+        this.blur.uniforms.step.value.set(level.radius / a.width, 0);
+        renderer.setRenderTarget(b);
+        renderer.render(this.quadScene, this.quadCamera);
+        this.blur.uniforms.source.value = b.texture;
+        this.blur.uniforms.step.value.set(0, level.radius / a.height);
+        renderer.setRenderTarget(a);
+        renderer.render(this.quadScene, this.quadCamera);
+      }
+      this.quad.material = this.accumulate;
+      this.accumulate.uniforms.source.value = a.texture;
+      this.accumulate.uniforms.weight.value = level.weight;
+      renderer.setRenderTarget(this.accum);
       renderer.render(this.quadScene, this.quadCamera);
     }
+    renderer.autoClear = autoClear;
 
     renderer.setRenderTarget(null);
     this.quad.material = this.composite;
@@ -165,13 +208,17 @@ export class LampBloom {
   compile(): void {
     this.quad.material = this.blur;
     this.renderer.compile(this.quadScene, this.quadCamera);
+    this.quad.material = this.accumulate;
+    this.renderer.compile(this.quadScene, this.quadCamera);
     this.quad.material = this.composite;
     this.renderer.compile(this.quadScene, this.quadCamera);
   }
 
   dispose(): void {
     for (const target of this.targets) target.dispose();
+    this.accum.dispose();
     this.blur.dispose();
+    this.accumulate.dispose();
     this.composite.dispose();
     this.quad.geometry.dispose();
   }
