@@ -582,6 +582,14 @@ const CATALOG: VehicleSpec[] = [
     realSpecs: { modelYear: 2020, powerHp: 827, engineDisplacementCc: 5980, torqueNm: 1100, drive: 'RWD', weightKg: 1246, transmission: '7 ileri Xtrac AMT', sourceIds: ['PAGANI_IMOLA'], note: 'Pagani basın bülteni: Mercedes-AMG V12, 827 hp, 1.100 Nm, 1.246 kg (kuru). Coupé için resmî azami hız yayımlanmadı; oyun değeri tahmindir.' },
     starterChoice: false,
   },
+  {
+    id: 'bmw-m5-e60', name: 'BMW M5 E60', shortName: 'M5 E60', subtitle: '8.250 dev/dakikaya çıkan S85 V10 ve SMG III', brand: 'BMW',
+    category: 'PERFORMANS', price: 480000, maxSpeed: 305, acceleration: 21.6, braking: 21.0,
+    handling: 0.94, steering: 1.36, power: 507, bodyStyle: 'sedan', bodyColor: '#2c3e57',
+    length: 4.855, width: 1.846, height: 1.469, modelPath: '/assets/models/GLB/BMW/M5/m5_e60.glb', modelRotationY: 0,
+    realSpecs: { modelYear: 2005, powerHp: 507, engineDisplacementCc: 4999, torqueNm: 520, drive: 'RWD', weightKg: 1830, transmission: '7 ileri SMG III', sourceIds: ['BMW_M5_E60'], note: '507 PS 7.750 dev/dk, 520 Nm 6.100 dev/dk, 0–100 km/sa 4,7 sn. Azami hız standartta 250 km/sa sınırlı, M Driver’s Package ile 305 km/sa; oyun 305 km/sa kullanır.' },
+    starterChoice: false,
+  },
 ];
 
 export const VEHICLES: VehicleSpec[] = CATALOG.map((vehicle) => ({
