@@ -851,12 +851,12 @@ button { color: inherit; }
 .debug-row input[type='range'] { width: 100%; accent-color: #b8edc9; }
 .debug-inline { flex-direction: row; justify-content: space-between; align-items: center; }
 .debug-inline label { display: flex; align-items: center; gap: 6px; }
-.debug-panel select, .debug-presets button {
+.debug-panel select, .debug-presets button, .debug-button {
   padding: 4px 6px; border: 1px solid rgba(184, 237, 201, .25); border-radius: 6px; color: #dce7de;
   background: rgba(40, 56, 46, .7); font: inherit; cursor: pointer;
 }
 .debug-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
-.debug-presets button:hover { border-color: var(--mint); }
+.debug-presets button:hover, .debug-button:hover { border-color: var(--mint); }
 .debug-stats { margin: 0; padding: 8px; border-radius: 7px; background: rgba(0, 0, 0, .35); color: #b6c6ba; font: inherit; line-height: 1.55; white-space: pre; }
 
 /* Tire Physics Debug Panel (L). */

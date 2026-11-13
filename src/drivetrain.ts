@@ -227,6 +227,8 @@ export interface DrivetrainInput {
   throttle: boolean;
   handbrake: boolean;
   burnout: boolean;      // line lock: fronts braked, driven wheels free to spin
+  /** Throttle while the brakes hold every driven wheel (AWD at a standstill): the engine revs against the slipping clutch, nothing turns. */
+  revAgainstBrakes?: boolean;
   tcs: boolean;          // traction control on (a burnout overrides it)
   grounded: boolean;
   forwardSpeed: number;  // m/s along the car
@@ -324,7 +326,7 @@ export class Drivetrain {
     if (inGear) {
       const wheelRpm = rpmAtSpeed(this.spec, drivenSpeed, gear);
       const gearIndex = gear === -1 ? 1 : gear;
-      const clutchRpm = input.throttle ? 1450 + 1850 / gearIndex : IDLE_RPM;
+      const clutchRpm = input.throttle || input.revAgainstBrakes ? 1450 + 1850 / gearIndex : IDLE_RPM;
       targetRpm = Math.max(wheelRpm, clutchRpm);
     } else {
       targetRpm = input.throttle ? REDLINE_RPM : IDLE_RPM;

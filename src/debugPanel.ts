@@ -1,6 +1,6 @@
 import type { EnvironmentState } from './environment';
 
-// Developer panel (P): time of day, day/night cycle and rain controls, plus
+// Developer panel (P): time of day, day/night cycle, rain, lightning and lens drop controls, plus
 // live renderer numbers. Plain DOM, outside the game UI; it only reports
 // changes through `onChange`.
 
@@ -38,9 +38,14 @@ export class DebugPanel {
   private readonly cycle: HTMLSelectElement;
   private readonly rain: HTMLInputElement;
   private readonly rainValue: HTMLElement;
+  private readonly lightning: HTMLInputElement;
+  private readonly lensDrops: HTMLInputElement;
   private readonly stats: HTMLElement;
 
-  constructor(private readonly onChange: (changes: Partial<EnvironmentState>) => void) {
+  constructor(
+    private readonly onChange: (changes: Partial<EnvironmentState>) => void,
+    onStrike: () => void,
+  ) {
     this.root = document.createElement('aside');
     this.root.className = 'debug-panel';
     this.root.hidden = true;
@@ -52,6 +57,9 @@ export class DebugPanel {
         '<select data-cycle aria-label="Bir günün süresi">' + CYCLE_OPTIONS.map(([minutes, label]) => '<option value="' + minutes + '">' + label + ' = 1 gün</option>').join('') + '</select></div>' +
       '<div class="debug-presets"><button type="button" data-hour="6.4">Şafak</button><button type="button" data-hour="12">Öğle</button><button type="button" data-hour="17.6">Gün batımı</button><button type="button" data-hour="23">Gece</button></div>' +
       '<label class="debug-row"><span>Yağmur <b data-rain-value>0%</b></span><input type="range" min="0" max="1" step="0.01" data-rain></label>' +
+      '<div class="debug-row debug-inline"><label><input type="checkbox" data-lightning> Şimşek (yağmur %45+)</label>' +
+        '<button type="button" class="debug-button" data-strike>Şimşek çak</button></div>' +
+      '<div class="debug-row debug-inline"><label><input type="checkbox" data-lens-drops> Ekranda damlalar</label></div>' +
       '<pre class="debug-stats" data-stats></pre>';
     this.time = this.root.querySelector('[data-time]') as HTMLInputElement;
     this.timeValue = this.root.querySelector('[data-time-value]') as HTMLElement;
@@ -60,6 +68,11 @@ export class DebugPanel {
     this.rain = this.root.querySelector('[data-rain]') as HTMLInputElement;
     this.rainValue = this.root.querySelector('[data-rain-value]') as HTMLElement;
     this.stats = this.root.querySelector('[data-stats]') as HTMLElement;
+    this.lightning = this.root.querySelector('[data-lightning]') as HTMLInputElement;
+    this.lensDrops = this.root.querySelector('[data-lens-drops]') as HTMLInputElement;
+    this.lightning.addEventListener('change', () => this.onChange({ lightning: this.lightning.checked }));
+    this.lensDrops.addEventListener('change', () => this.onChange({ lensDrops: this.lensDrops.checked }));
+    (this.root.querySelector('[data-strike]') as HTMLButtonElement).addEventListener('click', onStrike);
     this.time.addEventListener('input', () => this.onChange({ timeOfDay: Number(this.time.value) }));
     this.running.addEventListener('change', () => this.onChange({ cycleRunning: this.running.checked }));
     this.cycle.addEventListener('change', () => this.onChange({ cycleMinutes: Number(this.cycle.value) }));
@@ -92,6 +105,8 @@ export class DebugPanel {
     if (document.activeElement !== this.cycle) this.cycle.value = String(state.cycleMinutes);
     if (document.activeElement !== this.rain) this.rain.value = String(state.rain);
     this.rainValue.textContent = Math.round(state.rain * 100) + '%';
+    this.lightning.checked = state.lightning;
+    this.lensDrops.checked = state.lensDrops;
   }
 
   showInfo(info: DebugInfo): void {

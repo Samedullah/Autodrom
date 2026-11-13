@@ -16,6 +16,10 @@ export interface EnvironmentState {
   cycleMinutes: number;
   /** 0 dry .. 1 downpour. */
   rain: number;
+  /** Lightning strikes now and then in heavy rain. */
+  lightning: boolean;
+  /** Raindrops landing on the camera lens. */
+  lensDrops: boolean;
 }
 
 export interface EnvironmentLighting {
@@ -39,6 +43,8 @@ export interface EnvironmentLighting {
   darkness: number;
   /** 0 dry .. 1 soaked: lags behind the rain. */
   wetness: number;
+  /** 0..1 lightning flash right now. */
+  flash: number;
 }
 
 interface SkyKey { hour: number; zenith: string; horizon: string; ground: string; light: string }
@@ -64,6 +70,12 @@ const SUN_MAX_ELEVATION = THREE.MathUtils.degToRad(58);
 // Shadows from a sun right at the horizon would stretch across the whole map.
 const MIN_SHADOW_ELEVATION = 0.18;
 const MOON_STRENGTH = 0.05;      // moonlight as a share of full sun
+// Lightning: only in rain this heavy, every LIGHTNING_GAP seconds or so (sooner in a downpour).
+const LIGHTNING_MIN_RAIN = 0.45;
+const LIGHTNING_GAP = [7, 22] as const;
+const FLASH_COLOR = new THREE.Color('#d6e0ff');
+/** Seconds for one flicker of a flash to fade to ~37%. */
+const FLASH_DECAY = 0.11;
 const WET_UP_SECONDS = 25;       // to soak the ground under steady rain
 const DRY_SECONDS = 70;          // to dry again
 
@@ -82,8 +94,15 @@ function sunDirectionAt(hour: number, into: THREE.Vector3): number {
 }
 
 export class Environment {
-  readonly state: EnvironmentState = { timeOfDay: 13, cycleRunning: true, cycleMinutes: 24, rain: 0 };
+  readonly state: EnvironmentState = { timeOfDay: 13, cycleRunning: true, cycleMinutes: 24, rain: 0, lightning: true, lensDrops: true };
   readonly rain: RainField;
+  readonly bolt: LightningBolt;
+  /** Seconds until the next automatic strike. */
+  private nextStrike = 0;
+  /** Seconds since the last strike, and its flicker: start time and strength of each pulse. */
+  private strikeAge = Infinity;
+  private readonly pulses: Array<[number, number]> = [];
+  private flash = 0;
   private wetness = 0;
   private readonly lighting: EnvironmentLighting = {
     sky: { zenith: new THREE.Color(), horizon: new THREE.Color(), ground: new THREE.Color(), sun: new THREE.Color() },
@@ -99,6 +118,7 @@ export class Environment {
     fogFar: 1,
     darkness: 0,
     wetness: 0,
+    flash: 0,
   };
   private readonly sun = new THREE.Vector3();
   private readonly moon = new THREE.Vector3();
@@ -106,6 +126,20 @@ export class Environment {
 
   constructor(quality: GameSettings['quality']) {
     this.rain = new RainField(quality);
+    this.bolt = new LightningBolt();
+  }
+
+  /** A lightning strike now: a few quick flickers of light and a bolt in the sky. */
+  strike(): void {
+    this.strikeAge = 0;
+    this.pulses.length = 0;
+    const count = 2 + Math.floor(Math.random() * 3);
+    let start = 0;
+    for (let i = 0; i < count; i += 1) {
+      this.pulses.push([start, i === 0 ? 0.7 + Math.random() * 0.3 : 0.35 + Math.random() * 0.65]);
+      start += 0.07 + Math.random() * 0.16;
+    }
+    this.bolt.build((Math.random() - 0.5) * 2.2);
   }
 
   set(changes: Partial<EnvironmentState>): void {
@@ -125,6 +159,24 @@ export class Environment {
     if (state.cycleRunning) state.timeOfDay = (state.timeOfDay + dt * 24 / (state.cycleMinutes * 60)) % 24;
     const wetRate = state.rain > this.wetness ? 1 / WET_UP_SECONDS : 1 / DRY_SECONDS;
     this.wetness += THREE.MathUtils.clamp(state.rain - this.wetness, -wetRate * dt, wetRate * dt);
+    if (state.lightning && state.rain >= LIGHTNING_MIN_RAIN) {
+      this.nextStrike -= dt;
+      if (this.nextStrike <= 0) {
+        this.strike();
+        const heavy = THREE.MathUtils.smoothstep(state.rain, LIGHTNING_MIN_RAIN, 1);
+        this.nextStrike = THREE.MathUtils.lerp(LIGHTNING_GAP[1], LIGHTNING_GAP[0], heavy) * (0.5 + Math.random());
+      }
+    } else {
+      this.nextStrike = LIGHTNING_GAP[0] * Math.random();
+    }
+    this.strikeAge += dt;
+    // Each pulse lights up at once and dies away in a few hundredths of a second.
+    this.flash = 0;
+    for (const [start, strength] of this.pulses) {
+      const t = this.strikeAge - start;
+      if (t >= 0) this.flash = Math.max(this.flash, strength * Math.exp(-t / FLASH_DECAY));
+    }
+    if (this.flash < 0.003 && this.strikeAge > 1) this.pulses.length = 0;
     return this.evaluate();
   }
 
@@ -174,11 +226,99 @@ export class Environment {
     out.fogFar = 1 - 0.5 * rain;
     out.darkness = Math.max(out.darkness, rain * 0.55);
     out.wetness = this.wetness;
+    // Lightning: the clouds light up blue-white and fill every shadow for an instant.
+    const flash = this.flash;
+    out.flash = flash;
+    if (flash > 0) {
+      // The sky stays darker than the bolt so the bolt still reads against it.
+      out.sky.zenith.lerp(FLASH_COLOR, flash * 0.3);
+      out.sky.horizon.lerp(FLASH_COLOR, flash * 0.42);
+      out.fillSky.lerp(FLASH_COLOR, flash);
+      out.fillShare += flash * 4;
+    }
     return out;
   }
 
   dispose(): void {
     this.rain.dispose();
+    this.bolt.dispose();
+  }
+}
+
+const BOLT_DISTANCE = 850;
+const BOLT_TOP = 420;
+/** Sideways spacing of the bolt's three strands (about a pixel apart at BOLT_DISTANCE). */
+const BOLT_WIDTH = 1.1;
+
+/**
+ * A lightning bolt far off in the sky: a jagged line from the clouds to the
+ * ground with a few forks, rebuilt for every strike and shown only during
+ * its flash. It follows the camera like the sky does.
+ */
+export class LightningBolt {
+  readonly mesh: THREE.LineSegments;
+  private readonly material = new THREE.LineBasicMaterial({ color: '#eef2ff', transparent: true, fog: false, toneMapped: false, depthWrite: false });
+  private readonly direction = new THREE.Vector3(0, 0, 1);
+  /** Bolt's angle from where the camera looks, so the player sees most strikes. */
+  private angle = 0;
+
+  constructor() {
+    this.mesh = new THREE.LineSegments(new THREE.BufferGeometry(), this.material);
+    this.mesh.name = 'lightning';
+    this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
+    this.mesh.userData.castsShadow = false;
+  }
+
+  /** A new bolt, `angle` radians to the side of the camera's view. */
+  build(angle: number): void {
+    this.angle = angle;
+    const points: number[] = [];
+    // Built facing +Z; update() turns it to its place around the camera.
+    const forward = new THREE.Vector3(0, 0, 1);
+    const side = new THREE.Vector3(1, 0, 0);
+    // Walks down from the cloud base in short kinks; forks branch off sideways and die out.
+    const walk = (start: THREE.Vector3, drop: number, spread: number, steps: number, fork: number): void => {
+      const at = start.clone();
+      for (let i = 0; i < steps; i += 1) {
+        const next = at.clone()
+          .addScaledVector(side, (Math.random() - 0.5) * spread)
+          .addScaledVector(forward, (Math.random() - 0.5) * spread * 0.6);
+        next.y -= drop * (0.6 + Math.random() * 0.8);
+        points.push(at.x, at.y, at.z, next.x, next.y, next.z);
+        at.copy(next);
+        if (fork > 0 && Math.random() < 0.18) walk(at, drop * 0.8, spread * 1.3, 3 + Math.floor(Math.random() * 5), fork - 1);
+      }
+    };
+    walk(new THREE.Vector3((Math.random() - 0.5) * 120, BOLT_TOP, 0), BOLT_TOP / 26, 34, 26, 2);
+    // A 1-pixel line is lost at this distance: draw it three times side by side.
+    const thick: number[] = [];
+    for (const offset of [-BOLT_WIDTH, 0, BOLT_WIDTH]) {
+      for (let i = 0; i < points.length; i += 3) thick.push(points[i] + offset, points[i + 1], points[i + 2]);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(thick, 3));
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = geometry;
+  }
+
+  update(camera: THREE.Camera, flash: number): void {
+    const visible = flash > 0.12;
+    this.mesh.visible = visible;
+    if (!visible) return;
+    // Out in front of the camera at the bolt's angle, standing on the horizon below it.
+    camera.getWorldDirection(this.direction);
+    const yaw = Math.atan2(this.direction.x, this.direction.z) + this.angle;
+    this.direction.set(Math.sin(yaw), 0, Math.cos(yaw));
+    this.mesh.rotation.y = yaw;
+    this.mesh.position.copy(camera.position).addScaledVector(this.direction, BOLT_DISTANCE);
+    this.mesh.position.y = camera.position.y - 60;
+    this.material.opacity = Math.min(1, flash * 1.4);
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    this.material.dispose();
   }
 }
 

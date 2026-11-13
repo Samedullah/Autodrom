@@ -26,6 +26,7 @@ import {
   ROLLING_RESISTANCE,
   aeroDownforceG,
   aeroProfileOf,
+  driveLayoutOf,
   rpmAtSpeed,
   type AeroProfile,
   type Gear,
@@ -374,7 +375,7 @@ export class DriveEngine {
     this.scene.add(this.tireSmoke.mesh);
     this.scene.add(this.atmosphere.dome);
     this.environment = new Environment(this.settings.quality);
-    this.scene.add(this.environment.rain.mesh);
+    this.scene.add(this.environment.rain.mesh, this.environment.bolt.mesh);
     // Headlights: always in the scene (adding a light later would recompile
     // every material), dark by day.
     this.headlight.castShadow = false;
@@ -959,7 +960,8 @@ export class DriveEngine {
     this.brakeSpillScale = 0.08 + 0.92 * lighting.darkness;
     const state = this.environment.state;
     this.environment.rain.update(this.camera, this.environmentTime, state.rain, 1 - lighting.darkness * 0.75);
-    const dropsOn = this.drivingEnabled && this.settings.effects;
+    this.environment.bolt.update(this.camera, lighting.flash);
+    const dropsOn = this.drivingEnabled && this.settings.effects && state.lensDrops;
     if (dropsOn || this.lensDrops.active) {
       this.lensDrops.update(dt, dropsOn ? state.rain : 0, this.velocity.length(), 1 - lighting.darkness * 0.7, this.dropFocus);
     }
@@ -983,6 +985,12 @@ export class DriveEngine {
 
   getEnvironment(): EnvironmentState {
     return { ...this.environment.state };
+  }
+
+  /** Debug: a lightning strike right now. */
+  strikeLightning(): void {
+    this.environment.strike();
+    this.sceneNeedsRender = true;
   }
 
   setEnvironment(changes: Partial<EnvironmentState>): void {
@@ -1120,15 +1128,21 @@ export class DriveEngine {
     let longitudinal = this.velocity.dot(this.forward);
     let lateral = this.velocity.dot(this.right);
     if (this.settings.transmissionMode === 'automatic') this.updateAutomaticTransmission(longitudinal, gas);
-    const burnout = gas && brake && this.velocity.length() < 1.15;
+    // A burnout holds the car on the brakes while the driven wheels spin. With
+    // every wheel driven (AWD) the brakes hold the driven wheels too, so gas
+    // and brake together just hold the car.
+    // Out of gear nothing reaches the wheels: gas and brake just rev the engine.
+    const standingOnBoth = gas && brake && this.velocity.length() < 1.15 && this.gear !== 0;
+    const burnout = standingOnBoth && driveLayoutOf(this.vehicle) !== 'AWD';
     this.burnoutActive = burnout;
     const tyres = this.chassisOutput;
     const drive = this.drivetrain.step({
       dt,
       gear: this.gear,
-      throttle: gas && (!brake || burnout),
+      throttle: gas && (!brake || burnout || this.gear === 0),
       handbrake,
       burnout,
+      revAgainstBrakes: standingOnBoth && !burnout,
       tcs: this.tcsEnabled,
       grounded,
       forwardSpeed: longitudinal,
@@ -1231,10 +1245,12 @@ export class DriveEngine {
     this.wheelTravel += this.drivetrain.frontWheelSpeed * dt;
     this.rearWheelTravel += this.drivetrain.rearWheelSpeed * dt;
     const slideSmoke = drifting ? driftSeverity : 0;
+    // Burnout smoke comes off the driven (spinning) axle: the front on FWD cars.
+    const frontDriven = driveLayoutOf(this.vehicle) === 'FWD';
     this.updateTireSmoke(
       dt,
-      this.airborne ? 0 : burnout ? 1 : Math.max(slideSmoke, this.rearSpin),
-      this.airborne ? 0 : Math.max(this.frontSpin, speed > 6 ? this.chassisOutput.frontSlide * 0.6 : 0),
+      this.airborne ? 0 : burnout && !frontDriven ? 1 : Math.max(slideSmoke, this.rearSpin),
+      this.airborne ? 0 : burnout && frontDriven ? 1 : Math.max(this.frontSpin, speed > 6 ? this.chassisOutput.frontSlide * 0.6 : 0),
     );
     // The wheels show the real steering angle, counter-steer included.
     setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel, this.stance);
@@ -1638,11 +1654,12 @@ export class DriveEngine {
 
   private emitRemoteTireSmoke(remote: RemoteVehicle, vx: number, vz: number): void {
     const yaw = remote.root.rotation.y;
-    const rear = -remote.spec.length * 0.31;
+    // From the driven axle: the front wheels on FWD cars.
+    const along = remote.spec.length * 0.31 * (driveLayoutOf(remote.spec) === 'FWD' ? 1 : -1);
     const halfTrack = remote.spec.width * 0.51;
     for (const side of [-1, 1] as const) {
-      const x = remote.root.position.x + Math.sin(yaw) * rear + Math.cos(yaw) * side * halfTrack;
-      const z = remote.root.position.z + Math.cos(yaw) * rear - Math.sin(yaw) * side * halfTrack;
+      const x = remote.root.position.x + Math.sin(yaw) * along + Math.cos(yaw) * side * halfTrack;
+      const z = remote.root.position.z + Math.cos(yaw) * along - Math.sin(yaw) * side * halfTrack;
       this.emitWheelSmoke(remote.smokeEmitter + (side < 0 ? 0 : 1), x, z, yaw, side, vx, vz, smokeDensity(remote.smokeBuild));
     }
   }

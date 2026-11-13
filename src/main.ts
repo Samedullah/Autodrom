@@ -138,7 +138,7 @@ engine.prepare(reportLoading)
 const debugPanel = new DebugPanel((changes) => {
   engine.setEnvironment(changes);
   debugPanel.showState(engine.getEnvironment());
-});
+}, () => engine.strikeLightning());
 let debugTimer = 0;
 
 function refreshDebugPanel(): void {
