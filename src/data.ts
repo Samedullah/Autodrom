@@ -1,6 +1,6 @@
 export type CarClass = 'EKONOMI' | 'SEHIR' | 'SPORT' | 'PERFORMANS' | 'SUPER';
 export type BodyStyle = 'hatch' | 'sedan' | 'coupe' | 'roadster' | 'sport' | 'super';
-export type MapId = 'city-highway' | 'spa' | 'nurburgring' | 'bushido-peak';
+export type MapId = 'city-highway' | 'autodrom-gp' | 'spa' | 'nurburgring' | 'bushido-peak';
 
 export interface RealVehicleSpecs {
   modelYear?: number;
@@ -45,6 +45,7 @@ export interface VehicleSpec {
 export const ECONOMY = {
   startingCash: 10000,
   payoutEverySeconds: 3,
+  payoutMultiplier: 10,
   kmhPerUnit: 3.6,
   speedStepKmh: 20,
   marketMultiplier: 100000,
@@ -52,9 +53,13 @@ export const ECONOMY = {
   maxCreditedElapsedSeconds: 3,
 } as const;
 
-// In-game cars are drawn and simulated this much larger than the catalog
-// dimensions, so they read better against the map.
-export const VEHICLE_SCALE = 1.2;
+// Maps and cars are built this much larger than real life, so cars read better
+// against the map. The physics (vehicleSim.ts) runs in real metres; everything it
+// moves through the world is multiplied by this, so the scenery streams past at
+// the speed the speedometer shows.
+export const WORLD_SCALE = 1.2;
+// In-game cars are drawn at the world's scale.
+export const VEHICLE_SCALE = WORLD_SCALE;
 
 const CATALOG: VehicleSpec[] = [
   {
@@ -607,6 +612,7 @@ export const CLASS_LABELS: Record<CarClass, string> = {
 
 export const MAP_LABELS: Record<MapId, string> = {
   'city-highway': 'Şehir + Otoban',
+  'autodrom-gp': 'Autodrom GP',
   spa: 'Spa-Francorchamps',
   nurburgring: 'Nürburgring GP',
   'bushido-peak': 'Bushido Peak',

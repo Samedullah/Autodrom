@@ -89,7 +89,7 @@ function playerFor(socket, payload = {}) {
 }
 
 // Keep in sync with MapId in src/data.ts.
-const MAP_IDS = new Set(['city-highway', 'spa']);
+const MAP_IDS = new Set(['city-highway', 'autodrom-gp', 'spa', 'nurburgring', 'bushido-peak']);
 
 function removeFromRoom(socket) {
   const code = socket.data.roomCode;

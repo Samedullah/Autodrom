@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ECONOMY, MAP_LABELS, VEHICLES, type MapId, type VehicleSpec } from './data';
+import { ECONOMY, MAP_LABELS, VEHICLES, WORLD_SCALE, type MapId, type VehicleSpec } from './data';
 import { IncomeClock } from './economy';
 import type { GameSettings } from './save';
 import { brakeLampCenters, createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleMaterialQuality, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
@@ -11,26 +11,9 @@ import { LampBloom } from './lampBloom';
 import { CameraMotion } from './cameraMotion';
 import { Atmosphere, DAYLIGHT } from './atmosphere';
 import { Environment, applyWetness, type EnvironmentState } from './environment';
-import {
-  Chassis,
-  type ChassisBody,
-  type ChassisOutput,
-  type TireDebugState,
-  type TireEditTarget,
-  type TireProfileId,
-  type TireTuningParams,
-} from './chassis';
-import {
-  Drivetrain,
-  GEAR_SPEED,
-  ROLLING_RESISTANCE,
-  aeroDownforceG,
-  aeroProfileOf,
-  driveLayoutOf,
-  rpmAtSpeed,
-  type AeroProfile,
-  type Gear,
-} from './drivetrain';
+import type { TireDebugState, TireEditTarget, TireProfileId, TireTuningParams } from './chassis';
+import { aeroDownforceG, aeroProfileOf, driveLayoutOf, type AeroProfile, type Gear } from './drivetrain';
+import { VehicleSim } from './vehicleSim';
 import type { LocalPlayerState, MultiplayerClient, MultiplayerPlayer } from './multiplayer';
 import { STANCE_PRESETS, cloneStanceConfig, type StanceConfig, type StancePresetId } from './stancePanel';
 import { buildWorld, groundHeightAt, type WorldData } from './world';
@@ -76,9 +59,6 @@ interface RemoteVehicle {
 }
 
 
-const DOWNSHIFT_SAFE_SPEED_FACTOR = 0.9;
-const AUTO_UPSHIFT_RPM = 6700;
-const AUTO_DOWNSHIFT_RPM = 2500;
 const SMOKE_EMIT_INTERVAL = 0.03;
 // A model this slow to arrive finishes loading in the background instead.
 const MODEL_LOAD_TIMEOUT_MS = 30000;
@@ -91,9 +71,6 @@ const BRAKE_SPILL_RANGE = 3.5;
 const BRAKE_SPILL_BEHIND = 0.15;
 // Seconds between re-bakes of the sky reflections while the light changes.
 const ENVIRONMENT_BAKE_INTERVAL = 1.2;
-// Engine braking in 1st gear (m/s²), falling off in higher gears. Rolling and
-// air resistance come from the drivetrain module (air drag is per car).
-const ENGINE_BRAKING = 1.6;
 // Distance between wall checks along a frame's move (m); walls are 1 m cells.
 const WALL_CHECK_STEP = 0.5;
 // Chase camera framing, set on the 911 GT3 RS (5.48 m long, 1.58 m tall in
@@ -226,11 +203,9 @@ export class DriveEngine {
   private vehicle: VehicleSpec;
   private mapId: MapId;
   private settings: GameSettings;
-  private gear: Gear = 1;
   private velocity = new THREE.Vector3();
-  private yaw = Math.PI / 2;
-  private yawRate = 0;
-  private frontWheelAngle = 0;
+  // Vehicle dynamics (tyres, engine, gearbox); this class draws and moves what it computes.
+  private readonly sim: VehicleSim;
   private cameraOrbit = 0;
   private cameraElevation = CAMERA_ELEVATION;
   private cameraHeading = 0;
@@ -242,9 +217,6 @@ export class DriveEngine {
   private bodyAccelLong = 0;
   private bodyAccelLat = 0;
   private drivingEnabled = false;
-  private tcsEnabled = true;
-  private tcsActive = false;
-  private handbrakeGripBlend = 0;
   private cameraPointerId: number | null = null;
   private cameraPointerX = 0;
   private cameraPointerY = 0;
@@ -257,14 +229,6 @@ export class DriveEngine {
   private telemetryElapsed = 0;
   private wheelTravel = 0;
   private rearWheelTravel = 0;
-  private readonly drivetrain: Drivetrain;
-  private readonly chassis: Chassis;
-  private readonly chassisBody: ChassisBody;
-  // Last tyre state, fed back to the drivetrain's friction circle next frame.
-  private chassisOutput: ChassisOutput = { frontSlip: 0, rearSlip: 0, frontSideUse: 0, rearSideUse: 0, frontSlide: 0, rearSlide: 0 };
-  private rearSpin = 0;
-  private frontSpin = 0;
-  private burnoutActive = false;
   private driftValue = 0;
   private readonly forward = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
@@ -324,6 +288,11 @@ export class DriveEngine {
   private readonly ambient: THREE.HemisphereLight;
   private readonly resizeObserver: ResizeObserver;
 
+  private get gear(): Gear { return this.sim.gear; }
+  private get yaw(): number { return this.sim.body.yaw; }
+  private set yaw(value: number) { this.sim.body.yaw = value; }
+  private get frontWheelAngle(): number { return this.sim.frontWheelAngle; }
+
   constructor(
     private readonly host: HTMLElement,
     vehicle: VehicleSpec,
@@ -333,9 +302,8 @@ export class DriveEngine {
   ) {
     this.vehicle = vehicle;
     this.aeroProfile = aeroProfileOf(vehicle);
-    this.drivetrain = new Drivetrain(vehicle);
-    this.chassis = new Chassis(vehicle);
-    this.chassisBody = { velocity: this.velocity, yaw: this.yaw, yawRate: 0 };
+    this.sim = new VehicleSim(vehicle, this.velocity, Math.PI / 2);
+    this.sim.automatic = settings.transmissionMode === 'automatic';
     setVehicleMaterialQuality(settings.quality);
     this.mapId = mapId;
     this.settings = { ...settings };
@@ -583,8 +551,8 @@ export class DriveEngine {
   }
 
   toggleTcs(): boolean {
-    this.tcsEnabled = !this.tcsEnabled;
-    return this.tcsEnabled;
+    this.sim.tcsEnabled = !this.sim.tcsEnabled;
+    return this.sim.tcsEnabled;
   }
 
   setMultiplayer(client: MultiplayerClient): void {
@@ -619,26 +587,11 @@ export class DriveEngine {
   }
 
   shiftUp(): void {
-    if (this.settings.transmissionMode === 'automatic') return;
-    this.gear = (this.gear === -1 ? 0 : Math.min(6, Math.max(1, this.gear + 1))) as Gear;
+    this.sim.shiftUp();
   }
 
   shiftDown(): void {
-    if (this.settings.transmissionMode === 'automatic') return;
-    this.shiftDownIfSafe();
-  }
-
-  private shiftDownIfSafe(): boolean {
-    const nextGear = this.gear === 1 ? 0 : Math.max(-1, this.gear - 1) as Gear;
-    const speedKmh = this.velocity.length() * ECONOMY.kmhPerUnit;
-    if (nextGear > 0) {
-      const nextGearSpeedLimit = this.vehicle.maxSpeed * GEAR_SPEED[nextGear];
-      if (speedKmh > nextGearSpeedLimit * DOWNSHIFT_SAFE_SPEED_FACTOR) return false;
-    } else if (nextGear === -1 && speedKmh > 5) {
-      return false;
-    }
-    this.gear = nextGear;
-    return true;
+    this.sim.shiftDown();
   }
 
   setDrivingEnabled(enabled: boolean): void {
@@ -649,10 +602,8 @@ export class DriveEngine {
       this.touchKeys.clear();
       this.endCameraDrag();
       this.velocity.set(0, 0, 0);
-      this.yawRate = 0;
-      this.frontWheelAngle = 0;
+      this.sim.reset();
       this.driftValue = 0;
-      this.drivetrain.reset();
       setVehicleLights(this.visual, false, false);
       this.incomeClock.reset();
       this.callbacks.onTelemetry({ speedKmh: 0, gear: this.gear, rpm: 850, drifting: false, tcsActive: false });
@@ -662,12 +613,10 @@ export class DriveEngine {
   setVehicle(vehicle: VehicleSpec): void {
     this.vehicle = vehicle;
     this.aeroProfile = aeroProfileOf(vehicle);
-    this.gear = 1;
     this.velocity.set(0, 0, 0);
     this.wheelTravel = 0;
     this.rearWheelTravel = 0;
-    this.drivetrain.setVehicle(vehicle);
-    this.chassis.setVehicle(vehicle);
+    this.sim.setVehicle(vehicle);
     this.skidModelPositionsReady = false;
     this.incomeClock.reset();
     this.clearSkids();
@@ -773,6 +722,7 @@ export class DriveEngine {
 
   setSettings(settings: GameSettings): void {
     this.settings = { ...settings };
+    this.sim.automatic = settings.transmissionMode === 'automatic';
     this.sceneNeedsRender = true;
     this.renderer.shadowMap.enabled = settings.shadows && settings.quality !== 'low';
     this.renderer.setPixelRatio(renderPixelRatio(settings.quality, settings.resolutionScale));
@@ -807,23 +757,23 @@ export class DriveEngine {
   getVehicle(): VehicleSpec { return this.vehicle; }
 
   getTireDebugState(): TireDebugState {
-    return this.chassis.getDebugState();
+    return this.sim.chassis.getDebugState();
   }
 
   setTireProfile(profile: TireProfileId): void {
-    this.chassis.applyProfile(profile);
+    this.sim.chassis.applyProfile(profile);
   }
 
   setTireEditTarget(target: TireEditTarget): void {
-    this.chassis.setEditTarget(target);
+    this.sim.chassis.setEditTarget(target);
   }
 
   updateTireTuning(changes: Partial<TireTuningParams>): void {
-    this.chassis.updateTuning(changes);
+    this.sim.chassis.updateTuning(changes);
   }
 
   resetTireTuning(): void {
-    this.chassis.resetTuningToDefault();
+    this.sim.chassis.resetTuningToDefault();
   }
 
   getStanceState(): { preset: StancePresetId | null; config: StanceConfig } {
@@ -833,7 +783,7 @@ export class DriveEngine {
   setStancePreset(preset: StancePresetId): void {
     this.stancePreset = preset;
     Object.assign(this.stance, STANCE_PRESETS[preset].config);
-    this.chassis.setStance(this.stance);
+    this.sim.chassis.setStance(this.stance);
     this.applyStanceVisuals();
   }
 
@@ -852,7 +802,7 @@ export class DriveEngine {
     if (changes.springStiffnessMult !== undefined) this.stance.springStiffnessMult = THREE.MathUtils.clamp(changes.springStiffnessMult, 0.5, 2.5);
     if (changes.damperStiffnessMult !== undefined) this.stance.damperStiffnessMult = THREE.MathUtils.clamp(changes.damperStiffnessMult, 0.4, 2.5);
     if (changes.antiRollBarMult !== undefined) this.stance.antiRollBarMult = THREE.MathUtils.clamp(changes.antiRollBarMult, 0.3, 2.5);
-    this.chassis.setStance(this.stance);
+    this.sim.chassis.setStance(this.stance);
     this.applyStanceVisuals();
   }
 
@@ -870,13 +820,9 @@ export class DriveEngine {
     this.sceneNeedsRender = true;
     this.carRoot.position.copy(this.worldData.spawn);
     this.yaw = this.worldData.spawnYaw;
-    this.yawRate = 0;
-    this.frontWheelAngle = 0;
-    this.drivetrain.reset();
-    this.chassis.reset();
-    this.handbrakeGripBlend = 0;
-    this.driftValue = 0;
     this.velocity.set(0, 0, 0);
+    this.sim.reset();
+    this.driftValue = 0;
     this.previousCarPosition.copy(this.worldData.spawn);
     this.speedGateCooldowns.clear();
     this.drivingElapsed = 0;
@@ -1085,10 +1031,10 @@ export class DriveEngine {
             steeringAngle: this.frontWheelAngle,
             speedKmh: telemetry.speedKmh,
             drifting: telemetry.drifting,
-            burnout: this.burnoutActive || Math.max(this.rearSpin, this.frontSpin) > 0.35,
+            burnout: this.sim.burnout || Math.max(this.sim.output.rearSpin, this.sim.output.frontSpin) > 0.35,
             // The server drops values past ±36.
             mapId: this.mapId,
-            rearWheelSpinRate: THREE.MathUtils.clamp(this.drivetrain.rearWheelSpeed - this.velocity.dot(this.forward), -36, 36),
+            rearWheelSpinRate: THREE.MathUtils.clamp(this.sim.output.rearWheelSpeed - this.sim.forwardSpeed, -36, 36),
           };
           this.multiplayer.sendState(state);
         }
@@ -1115,142 +1061,42 @@ export class DriveEngine {
   private updateDriving(dt: number): void {
     this.previousCarPosition.copy(this.carRoot.position);
     this.drivingElapsed += dt;
-    // In the air the tyres have nothing to push against.
-    const grounded = !this.airborne;
-    const gas = grounded && this.isDown('w');
-    const brake = grounded && this.isDown('s');
-    const steerInput = grounded ? (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0) : 0;
-    const handbrake = grounded && this.isDown(' ');
-    // The handbrake lever builds rear lock progressively and releases quickly when let go.
-    this.handbrakeGripBlend = approach(this.handbrakeGripBlend, handbrake ? 1 : 0, dt * (handbrake ? 7.0 : 4.8));
+    const out = this.sim.step(dt, {
+      throttle: this.isDown('w') ? 1 : 0,
+      brake: this.isDown('s') ? 1 : 0,
+      steer: (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0),
+      handbrake: this.isDown(' '),
+    }, !this.airborne, this.wheelSuspensionLoads);
+    const burnout = this.sim.burnout;
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    let longitudinal = this.velocity.dot(this.forward);
-    let lateral = this.velocity.dot(this.right);
-    if (this.settings.transmissionMode === 'automatic') this.updateAutomaticTransmission(longitudinal, gas);
-    // A burnout holds the car on the brakes while the driven wheels spin. With
-    // every wheel driven (AWD) the brakes hold the driven wheels too, so gas
-    // and brake together just hold the car.
-    // Out of gear nothing reaches the wheels: gas and brake just rev the engine.
-    const standingOnBoth = gas && brake && this.velocity.length() < 1.15 && this.gear !== 0;
-    const burnout = standingOnBoth && driveLayoutOf(this.vehicle) !== 'AWD';
-    this.burnoutActive = burnout;
-    const tyres = this.chassisOutput;
-    const drive = this.drivetrain.step({
-      dt,
-      gear: this.gear,
-      throttle: gas && (!brake || burnout || this.gear === 0),
-      handbrake,
-      burnout,
-      revAgainstBrakes: standingOnBoth && !burnout,
-      tcs: this.tcsEnabled,
-      grounded,
-      forwardSpeed: longitudinal,
-      frontSideUse: tyres.frontSideUse,
-      rearSideUse: tyres.rearSideUse,
-      frontFrictionMult: this.chassis.frontFrictionMultiplier,
-      rearFrictionMult: this.chassis.rearFrictionMultiplier,
-      frontLongStiffness: this.chassis.frontLongStiffness,
-      rearLongStiffness: this.chassis.rearLongStiffness,
-      frontPeakSlipRatio: this.chassis.frontPeakSlipRatio,
-      rearPeakSlipRatio: this.chassis.rearPeakSlipRatio,
-      frontPostPeakGrip: this.chassis.frontPostPeakGrip,
-      rearPostPeakGrip: this.chassis.rearPostPeakGrip,
-    });
-    this.rearSpin = drive.rearSpin;
-    this.frontSpin = drive.frontSpin;
-    this.tcsActive = drive.tcsActive;
-
-    const brakeMuMult = 0.70 * this.chassis.frontFrictionMultiplier + 0.30 * this.chassis.rearFrictionMultiplier;
-    const brakeSideUse = Math.min(0.92, 0.70 * tyres.frontSideUse + 0.30 * tyres.rearSideUse);
-    const brakeEllipse = Math.sqrt(Math.max(0.36, 1 - 0.55 * brakeSideUse * brakeSideUse));
-    const effectiveBraking = this.vehicle.braking * brakeMuMult * brakeEllipse;
-    const braking = brake && !burnout && Math.abs(longitudinal) > 0.33;
-    if (brake) {
-      // During a burnout the front brakes hold the car while the driven wheels spin.
-      if (Math.abs(longitudinal) > 0.33) {
-        longitudinal = approach(longitudinal, 0, effectiveBraking * dt);
-      } else {
-        longitudinal = 0;
-      }
-    } else {
-      longitudinal += drive.accel * dt;
-      // Rolling and air resistance always, engine braking off throttle in gear.
-      // Small enough that a downhill run (gravity, applied by the suspension)
-      // really carries the car faster.
-      const resistance = ROLLING_RESISTANCE + this.drivetrain.airDrag * longitudinal * longitudinal
-        + (!gas && this.gear !== 0 ? ENGINE_BRAKING / Math.pow(Math.max(1, Math.abs(this.gear)), 0.6) : 0);
-      longitudinal = approach(longitudinal, 0, resistance * dt);
-    }
-    this.velocity.copy(this.forward).multiplyScalar(longitudinal).addScaledVector(this.right, lateral);
+    const longitudinal = this.velocity.dot(this.forward);
+    const lateral = this.velocity.dot(this.right);
     const speed = this.velocity.length();
-
-    // Speed-sensitive steering, self-aligning caster, and counter-steer assistance.
-    this.frontWheelAngle = this.chassis.updateSteering(
-      this.frontWheelAngle,
-      steerInput,
-      longitudinal,
-      lateral,
-      this.yawRate,
-      this.vehicle.handling,
-      this.vehicle.steering,
-      dt,
-    );
-
-    // 4-wheel tyre model turns and pushes the car (see chassis.ts).
-    const body = this.chassisBody;
-    body.yaw = this.yaw;
-    body.yawRate = this.yawRate;
-    this.chassisOutput = this.chassis.step(body, {
-      dt,
-      steer: this.frontWheelAngle,
-      grounded,
-      accelLong: this.bodyAccelLong,
-      accelLat: this.bodyAccelLat,
-      frontLongUse: drive.frontLongUse,
-      rearLongUse: drive.rearLongUse,
-      frontSpin: drive.frontSpin,
-      rearSpin: drive.rearSpin,
-      frontSlipSpeed: this.drivetrain.frontWheelSpeed - longitudinal,
-      rearSlipSpeed: this.drivetrain.rearWheelSpeed - longitudinal,
-      rearLock: this.handbrakeGripBlend,
-      braking: braking ? this.vehicle.braking : 0,
-      drivenTraction: drive.accel,
-      wheelSuspensionLoads: this.wheelSuspensionLoads,
-    });
-    this.yaw = body.yaw;
-    this.yawRate = body.yawRate;
-
-    this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    longitudinal = this.velocity.dot(this.forward);
-    lateral = this.velocity.dot(this.right);
     // Sliding: the rear tyres are past their grip (or locked by the handbrake).
     const slipAngle = Math.atan2(Math.abs(lateral), Math.max(Math.abs(longitudinal), 1));
-    const driftSeverity = this.chassisOutput.rearSlide;
+    const driftSeverity = out.rearSlide;
     const drifting = speed > 6 && Math.abs(lateral) > 1 && driftSeverity > 0.05;
     this.driftValue = drifting ? Math.min(1, this.driftValue + dt * (1.5 + driftSeverity * 2)) : Math.max(0, this.driftValue - dt * 3.4);
 
-    const speedMagnitude = this.velocity.length();
-    const absoluteLimit = this.vehicle.maxSpeed / ECONOMY.kmhPerUnit + 2;
-    if (speedMagnitude > absoluteLimit) this.velocity.multiplyScalar(absoluteLimit / speedMagnitude);
-    this.carRoot.position.addScaledVector(this.velocity, dt);
+    // Physics speeds are real metres per second; the world is built WORLD_SCALE times larger.
+    this.carRoot.position.addScaledVector(this.velocity, dt * WORLD_SCALE);
     this.handleCollisions();
     this.checkSpeedGates();
     this.updateSuspension(dt);
     this.carRoot.rotation.set(-this.bodyPitch, this.yaw, this.bodyRoll);
     this.carRoot.position.y = this.bodyHeight + 0.015;
     // Skid marks are laid flat on the map, so only draw them there.
-    this.updateSkids((drifting || this.rearSpin > 0.3) && !this.airborne, slipAngle, speed);
-    this.wheelTravel += this.drivetrain.frontWheelSpeed * dt;
-    this.rearWheelTravel += this.drivetrain.rearWheelSpeed * dt;
+    this.updateSkids((drifting || out.rearSpin > 0.3) && !this.airborne, slipAngle, speed);
+    this.wheelTravel += out.frontWheelSpeed * dt * WORLD_SCALE;
+    this.rearWheelTravel += out.rearWheelSpeed * dt * WORLD_SCALE;
     const slideSmoke = drifting ? driftSeverity : 0;
     // Burnout smoke comes off the driven (spinning) axle: the front on FWD cars.
     const frontDriven = driveLayoutOf(this.vehicle) === 'FWD';
     this.updateTireSmoke(
       dt,
-      this.airborne ? 0 : burnout && !frontDriven ? 1 : Math.max(slideSmoke, this.rearSpin),
-      this.airborne ? 0 : burnout && frontDriven ? 1 : Math.max(this.frontSpin, speed > 6 ? this.chassisOutput.frontSlide * 0.6 : 0),
+      this.airborne ? 0 : burnout && !frontDriven ? 1 : Math.max(slideSmoke, out.rearSpin),
+      this.airborne ? 0 : burnout && frontDriven ? 1 : Math.max(out.frontSpin, speed > 6 ? out.frontSlide * 0.6 : 0),
     );
     // The wheels show the real steering angle, counter-steer included.
     setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel, this.stance);
@@ -1579,7 +1425,7 @@ export class DriveEngine {
       const projectedTravel = dx * Math.sin(remote.root.rotation.y) + dz * Math.cos(remote.root.rotation.y);
       remote.wheelTravel += projectedTravel;
       const rearSpinRate = Number.isFinite(target.rearWheelSpinRate) ? target.rearWheelSpinRate : 0;
-      remote.rearWheelTravel += projectedTravel + rearSpinRate * dt;
+      remote.rearWheelTravel += projectedTravel + rearSpinRate * dt * WORLD_SCALE;
       remote.previousX = remote.root.position.x;
       remote.previousZ = remote.root.position.z;
       setVehicleWheelSpin(remote.visual, remote.wheelTravel, remote.steeringAngle, remote.rearWheelTravel);
@@ -1614,14 +1460,14 @@ export class DriveEngine {
           const side = wheel === 0 ? -1 : 1;
           if (rear > 0) {
             const position = this.skidCurrentPositions[wheel];
-            this.emitWheelSmoke(wheel, position.x, position.z, this.yaw, side, this.velocity.x, this.velocity.z, rear);
+            this.emitWheelSmoke(wheel, position.x, position.z, this.yaw, side, this.velocity.x * WORLD_SCALE, this.velocity.z * WORLD_SCALE, rear);
           }
           if (front > 0) {
             const ahead = this.vehicle.length * 0.31;
             const across = this.vehicle.width * 0.51 * side;
             const x = this.carRoot.position.x + Math.sin(this.yaw) * ahead + Math.cos(this.yaw) * across;
             const z = this.carRoot.position.z + Math.cos(this.yaw) * ahead - Math.sin(this.yaw) * across;
-            this.emitWheelSmoke(2 + wheel, x, z, this.yaw, side, this.velocity.x, this.velocity.z, front);
+            this.emitWheelSmoke(2 + wheel, x, z, this.yaw, side, this.velocity.x * WORLD_SCALE, this.velocity.z * WORLD_SCALE, front);
           }
         }
       }
@@ -1911,29 +1757,14 @@ export class DriveEngine {
     return Math.max(0, this.velocity.dot(this.forward) * ECONOMY.kmhPerUnit);
   }
 
-  private updateAutomaticTransmission(longitudinal: number, gas: boolean): void {
-    if (this.gear < 1) {
-      this.gear = 1;
-      return;
-    }
-    // Shift on road speed, not wheel speed: a spinning tyre should not upshift.
-    const rpm = rpmAtSpeed(this.vehicle, longitudinal, this.gear);
-    if (gas && rpm >= AUTO_UPSHIFT_RPM && this.gear < 6) {
-      this.gear = (this.gear + 1) as Gear;
-    } else if (this.gear > 1 && rpm <= AUTO_DOWNSHIFT_RPM) {
-      this.shiftDownIfSafe();
-    }
-  }
-
-
   private makeTelemetry(): Telemetry {
     const signed = this.velocity.dot(this.forward);
     const t = this.telemetryState;
     t.speedKmh = Math.abs(signed) * ECONOMY.kmhPerUnit;
     t.gear = this.gear;
-    t.rpm = Math.round(this.drivetrain.rpm);
+    t.rpm = Math.round(this.sim.drivetrain.rpm);
     t.drifting = this.driftValue > 0.2;
-    t.tcsActive = this.tcsActive;
+    t.tcsActive = this.sim.output.tcsActive;
     return t;
   }
 
@@ -1975,10 +1806,6 @@ function smokeDensity(build: number): number {
   return 0.12 + 0.88 * build * build;
 }
 
-function approach(value: number, target: number, delta: number): number {
-  if (value < target) return Math.min(target, value + delta);
-  return Math.max(target, value - delta);
-}
 
 function disposeObject(object: THREE.Object3D): void {
   object.traverse((child) => {

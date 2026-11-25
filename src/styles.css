@@ -410,6 +410,10 @@ button { color: inherit; }
 .map-card.city-highway .map-art i { width: 145%; height: 18px; top: 62px; left: -18%; transform: rotate(-8deg); }
 .map-card.city-highway .map-art b { width: 35%; height: 58px; left: 55%; top: 34px; border-radius: 50%; background: transparent; border: 13px solid #343c38; transform: rotate(8deg); }
 .map-card.city-highway .map-art em { width: 34%; height: 5px; top: 63px; left: 38%; transform: rotate(-8deg); background: #d7d1b4; }
+.map-card.autodrom-gp .map-art { background: linear-gradient(150deg, #244842, #3d6d58 52%, #7d9170); }
+.map-card.autodrom-gp .map-art i { width: 74%; height: 56px; top: 34px; left: 12%; border-radius: 34px 44% 38% 42%; background: transparent; border: 11px solid #2d3436; transform: rotate(-5deg); }
+.map-card.autodrom-gp .map-art b { width: 36%; height: 8px; top: 44px; left: 26%; border-radius: 4px; background: #1d9a7f; border-color: rgba(236, 244, 232, .65); transform: rotate(-5deg); }
+.map-card.autodrom-gp .map-art em { width: 10px; height: 18px; top: 28px; left: 36%; background: #f2efe4; border-color: #c8322b; transform: rotate(-5deg); }
 .map-card.spa .map-art { background: linear-gradient(160deg, #3e5a45, #6f8a62 50%, #8f9a72); }
 .map-card.spa .map-art i { width: 62%; height: 54px; top: 34px; left: 12%; border-radius: 48% 30% 55% 22%; background: transparent; border: 10px solid #343c38; transform: rotate(-14deg); }
 .map-card.spa .map-art b { width: 26%; height: 30px; top: 22px; left: 62%; border-radius: 40% 60% 20% 50%; background: transparent; border: 9px solid #343c38; transform: rotate(22deg); }

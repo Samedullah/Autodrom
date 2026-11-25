@@ -510,6 +510,7 @@ export class GameInterface {
   private mapMenu(inGame: boolean): string {
     const maps: Array<{ id: MapId; title: string; description: string; image: string; tag: string }> = [
       { id: 'city-highway', title: 'Şehir + Otoban', description: 'Şehir caddelerinden bağlantı yoluyla çevre otobanına kesintisiz sürüş. Hız kapılarında 200 km/sa ile geçip ₺5.000 kazan.', image: 'city-highway', tag: 'TEK, BAĞLI DÜNYA' },
+      { id: 'autodrom-gp', title: 'Autodrom GP', description: 'İnişli çıkışlı 3,2 km Grand Prix pisti: 660 m ana düzlük, girilebilir pit yolu ve garajlar, yüksek hızlı S-virajları, 6,5° eğimli karusel, tribünler ve 2 hız kapısı.', image: 'autodrom-gp', tag: 'İMZA YARIŞ PİSTİ' },
       { id: 'spa', title: 'Spa-Francorchamps', description: '1992 düzeninde efsanevi Belçika pisti: La Source, Eau Rouge ve Raidillon dahil ~100 metrelik iniş çıkış, bariyerler ve pit binaları.', image: 'spa', tag: 'YARIŞ PİSTİ' },
       { id: 'nurburgring', title: 'Nürburgring GP', description: 'Eifel dağlarındaki teknik Grand Prix pisti: geniş start düzlüğü, Castrol-S, Dunlop firketesi, hızlı şikanlar ve eğimli virajlar.', image: 'nurburgring', tag: 'GP PİSTİ' },
       { id: 'bushido-peak', title: 'Bushido Peak', description: 'Japon dağ geçidi ve touge rotası: ~200 metrelik tırmanış, ardışık keskin virajlar, kasaba sokakları ve yüksek hızda drift etapları.', image: 'bushido-peak', tag: 'DAĞ GEÇİDİ · TOUGE' },

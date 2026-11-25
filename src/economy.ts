@@ -9,7 +9,7 @@ export function calculatePayout(speedKmh: number, marketPrice: number): number {
   const forwardSpeed = Math.max(0, Number.isFinite(speedKmh) ? speedKmh : 0);
   const price = Math.max(0, Number.isFinite(marketPrice) ? marketPrice : 0);
   if (forwardSpeed < ECONOMY.minimumPayoutSpeed) return 0;
-  return Math.floor((forwardSpeed / ECONOMY.speedStepKmh) * (1 + price / ECONOMY.marketMultiplier));
+  return Math.floor((forwardSpeed / ECONOMY.speedStepKmh) * (1 + price / ECONOMY.marketMultiplier) * ECONOMY.payoutMultiplier);
 }
 
 export class IncomeClock {
