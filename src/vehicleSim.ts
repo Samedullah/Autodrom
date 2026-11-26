@@ -149,6 +149,7 @@ export class VehicleSim {
       lineLock: this.burnout,
       handbrake: this.handbrakeBlend,
       tcs: this.tcsEnabled && !this.burnout,
+      steerInput,
       wheelSuspensionLoads,
     });
 

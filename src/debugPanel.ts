@@ -57,7 +57,7 @@ export class DebugPanel {
         '<select data-cycle aria-label="Bir günün süresi">' + CYCLE_OPTIONS.map(([minutes, label]) => '<option value="' + minutes + '">' + label + ' = 1 gün</option>').join('') + '</select></div>' +
       '<div class="debug-presets"><button type="button" data-hour="6.4">Şafak</button><button type="button" data-hour="12">Öğle</button><button type="button" data-hour="17.6">Gün batımı</button><button type="button" data-hour="23">Gece</button></div>' +
       '<label class="debug-row"><span>Yağmur <b data-rain-value>0%</b></span><input type="range" min="0" max="1" step="0.01" data-rain></label>' +
-      '<div class="debug-row debug-inline"><label><input type="checkbox" data-lightning> Şimşek (yağmur %45+)</label>' +
+      '<div class="debug-row debug-inline"><label><input type="checkbox" data-lightning> Şimşek (yağmur %55+)</label>' +
         '<button type="button" class="debug-button" data-strike>Şimşek çak</button></div>' +
       '<div class="debug-row debug-inline"><label><input type="checkbox" data-lens-drops> Ekranda damlalar</label></div>' +
       '<pre class="debug-stats" data-stats></pre>';
@@ -95,6 +95,10 @@ export class DebugPanel {
   toggle(): boolean {
     this.root.hidden = !this.root.hidden;
     return this.open;
+  }
+
+  setOpen(open: boolean): void {
+    this.root.hidden = !open;
   }
 
   /** Brings the controls in line with the environment (the clock may be running). */

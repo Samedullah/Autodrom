@@ -178,6 +178,43 @@ test('drifting still works: handbrake or power with TCS off breaks the rear loos
   assert.ok(heldSeconds > 2, `drift held for ${heldSeconds.toFixed(1)} s`);
 });
 
+test('steering into a drift tightens the line instead of running wide, without spinning', () => {
+  for (const [id, kmh, gear] of [['bmw-m4-competition-2025', 50, 2], ['bmw-m4-competition-2025', 80, 3], ['nissan-350z-2003', 80, 3]] as const) {
+    const pathTurn = (steer: number): { turned: number; spun: boolean } => {
+      const sim = makeSim(id, { kmh, tcs: false, automatic: false, gear });
+      const heading = (): number => Math.atan2(sim.body.velocity.x, sim.body.velocity.z);
+      for (let t = 0; t < 0.5; t += DT) sim.step(DT, { throttle: 0.6, brake: 0, steer: 1, handbrake: t < 0.35 }, true);
+      const start = heading();
+      const trace = drive(sim, 1.5, () => ({ throttle: 0.75, brake: 0, steer, handbrake: false }));
+      return { turned: Math.abs(heading() - start) * 180 / Math.PI, spun: trace.spun };
+    };
+    const neutral = pathTurn(0);
+    const into = pathTurn(1);
+    assert.ok(!into.spun, `${id} @${kmh}: spun while steering into the drift`);
+    assert.ok(into.turned > neutral.turned + 10, `${id} @${kmh}: steering in turned the path ${into.turned.toFixed(0)}° vs ${neutral.turned.toFixed(0)}° neutral`);
+  }
+});
+
+test('RWD drift: rear tyres drop to kinetic sliding grip (~60–75%) and sustain drift on throttle lift-off', () => {
+  const sim = makeSim('bmw-m4-competition-2025', { kmh: 75, tcs: false, automatic: false, gear: 2 });
+  // Initiate drift with handbrake, then settle on power
+  drive(sim, 0.35, () => ({ throttle: 0.8, brake: 0, steer: 1, handbrake: true }));
+  drive(sim, 0.65, () => ({ throttle: 1.0, brake: 0, steer: 0, handbrake: false }));
+  const entrySlip = slipAngleDeg(sim);
+  const telOnGas = sim.chassis.getDebugState().telemetry;
+  const rearGripOnGas = 0.5 * (telOnGas[2].gripUtilization + telOnGas[3].gripUtilization);
+  assert.ok(entrySlip > 18, `expected active drift before lift-off, got ${entrySlip.toFixed(1)}°`);
+  assert.ok(rearGripOnGas < 0.78, `sliding rear tyres should not report ~93% grip, got ${(rearGripOnGas * 100).toFixed(0)}%`);
+
+  // Lift off throttle completely for 1.0 s: drift should glide smoothly instead of snapping straight
+  const liftTrace = drive(sim, 1.0, () => ({ throttle: 0, brake: 0, steer: 0, handbrake: false }));
+  const telOffGas = sim.chassis.getDebugState().telemetry;
+  const rearGripOffGas = 0.5 * (telOffGas[2].gripUtilization + telOffGas[3].gripUtilization);
+  assert.ok(!liftTrace.spun, 'spun after lifting off mid-drift');
+  assert.ok(slipAngleDeg(sim) > 14, `drift snapped shut on lift-off (${entrySlip.toFixed(1)}° -> ${slipAngleDeg(sim).toFixed(1)}°)`);
+  assert.ok(rearGripOffGas < 0.78, `off-throttle sliding rear grip jumped to ${(rearGripOffGas * 100).toFixed(0)}%`);
+});
+
 test('burnout: RWD spins the rears on the spot, AWD just revs', () => {
   const rwd = makeSim('bmw-m4-competition-2025');
   let moved = 0;

@@ -40,6 +40,7 @@ const SPA_CONFIG: TrackWorldConfig = {
   groundPattern: /road|grass|grvl|rmbl|hill|gbrm|segwide/i,
   wallPattern: /grdrl|twall|mtla|bldg|bldn|fnc|fence|pinewall|gsbars/i,
   shadowPattern: /grdrl|twall|mtla|bldg|bldn|fnc|fence|pine|gsbars|gurder|tent|sign/i,
+  mergeStaticByMaterial: true,
 };
 
 const NURBURGRING_CONFIG: TrackWorldConfig = {
@@ -188,9 +189,12 @@ function createTrackWorld(config: TrackWorldConfig, settings: GameSettings): Wor
   return world;
 }
 
+const BATCH_CHUNK_METRES = 280;
+
 /**
  * Merges static single-material meshes that share the same material, shadow flag,
- * and attribute layout so multi-thousand-mesh tracks render in ~100 draw calls.
+ * attribute layout, and 280m spatial chunk so multi-thousand-mesh tracks render in
+ * low draw calls while preserving frustum culling for both main view and 80m shadow maps.
  */
 function batchStaticMeshes(root: THREE.Group, model: THREE.Object3D, settings: GameSettings): void {
   const buckets = new Map<string, {
@@ -198,15 +202,27 @@ function batchStaticMeshes(root: THREE.Group, model: THREE.Object3D, settings: G
     castsShadow: boolean;
     geometries: THREE.BufferGeometry[];
   }>();
+  const sourceGeometries = new Set<THREE.BufferGeometry>();
+  const meshBox = new THREE.Box3();
+  const meshCenter = new THREE.Vector3();
 
   model.traverse((object) => {
     const mesh = object as THREE.Mesh;
     if (!mesh.isMesh || Array.isArray(mesh.material) || !mesh.geometry) return;
     const geom = mesh.geometry;
+    sourceGeometries.add(geom);
+    if (!geom.boundingBox) geom.computeBoundingBox();
+    if (geom.boundingBox) {
+      meshBox.copy(geom.boundingBox).applyMatrix4(mesh.matrixWorld).getCenter(meshCenter);
+    } else {
+      meshCenter.setFromMatrixPosition(mesh.matrixWorld);
+    }
+    const cx = Math.floor(meshCenter.x / BATCH_CHUNK_METRES);
+    const cz = Math.floor(meshCenter.z / BATCH_CHUNK_METRES);
     const attrs = Object.entries(geom.attributes).map(([name, attribute]) => name + attribute.itemSize).sort().join(',');
     const indexed = geom.index !== null ? '1' : '0';
     const castsShadow = Boolean(mesh.userData.castsShadow);
-    const key = `${mesh.material.uuid}|${castsShadow ? '1' : '0'}|${indexed}|${attrs}`;
+    const key = `${mesh.material.uuid}|${castsShadow ? '1' : '0'}|${indexed}|${cx},${cz}|${attrs}`;
     let bucket = buckets.get(key);
     if (!bucket) {
       bucket = { material: mesh.material, castsShadow, geometries: [] };
@@ -228,6 +244,8 @@ function batchStaticMeshes(root: THREE.Group, model: THREE.Object3D, settings: G
       for (const g of bucket.geometries) g.dispose();
     }
     if (!merged) continue;
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
     const mesh = new THREE.Mesh(merged, bucket.material);
     mesh.userData.castsShadow = bucket.castsShadow;
     mesh.castShadow = settings.shadows && settings.quality !== 'low' && bucket.castsShadow;
@@ -236,6 +254,7 @@ function batchStaticMeshes(root: THREE.Group, model: THREE.Object3D, settings: G
   }
 
   root.remove(model);
+  for (const geom of sourceGeometries) geom.dispose();
   root.add(batchedGroup);
 }
 

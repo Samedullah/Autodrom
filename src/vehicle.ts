@@ -156,7 +156,7 @@ interface LampGlow { meshes: THREE.Mesh[]; material: THREE.Material }
 /** A bloom-layer copy of each lamp mesh, parented to it so it follows the car. */
 function createLampGlow(lamps: THREE.Mesh[]): LampGlow | null {
   if (lamps.length === 0) return null;
-  const material = new THREE.MeshBasicMaterial({ color: LAMP_BLOOM_COLOR, toneMapped: false, side: THREE.DoubleSide });
+  const material = new THREE.MeshBasicMaterial({ color: LAMP_BLOOM_COLOR, toneMapped: false, fog: false, side: THREE.DoubleSide });
   const meshes: THREE.Mesh[] = [];
   for (const lamp of lamps) {
     const skinned = lamp as THREE.SkinnedMesh;
@@ -1048,12 +1048,23 @@ export async function installGeneratedModel(visual: VehicleVisual, spec: Vehicle
   }
 }
 
+const MAX_CACHED_MODELS = 4;
+
 function releaseModelIfUnused(path: string, cached: CachedModel): void {
   if (cached.references > 0 || cached.pendingUsers > 0 || modelCache.get(path) !== cached) return;
+  // Refresh LRU insertion order and retain up to MAX_CACHED_MODELS recently used cars so
+  // switching between menus, preview stages, and driving never re-downloads or re-merges GLBs.
   modelCache.delete(path);
-  void cached.promise.then((model) => {
-    if (model) disposeObjectResources(model);
-  });
+  modelCache.set(path, cached);
+  if (modelCache.size <= MAX_CACHED_MODELS) return;
+  for (const [oldPath, entry] of modelCache) {
+    if (modelCache.size <= MAX_CACHED_MODELS) break;
+    if (entry.references > 0 || entry.pendingUsers > 0) continue;
+    modelCache.delete(oldPath);
+    void entry.promise.then((model) => {
+      if (model) disposeObjectResources(model);
+    });
+  }
 }
 
 function disposeObjectResources(object: THREE.Object3D): void {

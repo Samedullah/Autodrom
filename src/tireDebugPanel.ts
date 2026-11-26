@@ -64,10 +64,10 @@ const SLIDER_SPECS: Array<{
   step: number;
   format: (v: number) => string;
 }> = [
-  { key: 'frictionCoeff', label: 'Friction Coefficient', min: 0.5, max: 1.8, step: 0.02, format: (v) => v.toFixed(2) },
-  { key: 'longStiffness', label: 'Longitudinal Stiffness', min: 0.4, max: 2.5, step: 0.05, format: (v) => v.toFixed(2) },
-  { key: 'latStiffness', label: 'Lateral Stiffness', min: 0.4, max: 2.5, step: 0.05, format: (v) => v.toFixed(2) },
-  { key: 'peakSlipAngleDeg', label: 'Peak Slip Angle', min: 3.0, max: 18.0, step: 0.5, format: (v) => v.toFixed(1) + '°' },
+  { key: 'frictionCoeff', label: 'Friction Coefficient', min: 0.5, max: 2.2, step: 0.02, format: (v) => v.toFixed(2) },
+  { key: 'longStiffness', label: 'Longitudinal Stiffness', min: 0.4, max: 2.8, step: 0.05, format: (v) => v.toFixed(2) },
+  { key: 'latStiffness', label: 'Lateral Stiffness', min: 0.4, max: 2.8, step: 0.05, format: (v) => v.toFixed(2) },
+  { key: 'peakSlipAngleDeg', label: 'Peak Slip Angle', min: 2.0, max: 18.0, step: 0.5, format: (v) => v.toFixed(1) + '°' },
   { key: 'peakSlipRatio', label: 'Peak Longitudinal Slip', min: 0.04, max: 0.35, step: 0.01, format: (v) => v.toFixed(2) },
   { key: 'postPeakGrip', label: 'Post-Peak Grip', min: 0.4, max: 1.0, step: 0.02, format: (v) => Math.round(v * 100) + '%' },
   { key: 'loadSensitivity', label: 'Load Sensitivity', min: 0.0, max: 0.45, step: 0.01, format: (v) => v.toFixed(2) },
@@ -187,6 +187,10 @@ export class TireDebugPanel {
   toggle(): boolean {
     this.root.hidden = !this.root.hidden;
     return this.open;
+  }
+
+  setOpen(open: boolean): void {
+    this.root.hidden = !open;
   }
 
   private targetTireParams(state: TireDebugState): TireTuningParams {

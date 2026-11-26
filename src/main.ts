@@ -50,6 +50,17 @@ const engine = new DriveEngine(gameHost, activeVehicle, currentMap, settings, {
     updateUi(false);
     ui?.showIncome(amount);
   },
+  onDriftComplete: (score, payout, maxMultiplier) => {
+    save.cash += payout;
+    saveGame(save);
+    updateUi(false);
+    ui?.showIncome(payout, 'DRİFT ÖDÜLÜ (%30)');
+    ui?.showMessage(
+      'DRİFT SERİSİ TAMAMLANDI',
+      score.toLocaleString('tr-TR') + ' puan (×' + maxMultiplier.toFixed(1) + ') · +₺' + payout.toLocaleString('tr-TR') + ' kazandın.',
+      false,
+    );
+  },
   onMissionComplete: (amount) => {
     save.cash += amount;
     saveGame(save);
@@ -64,6 +75,7 @@ const engine = new DriveEngine(gameHost, activeVehicle, currentMap, settings, {
   onDebugPanel: () => toggleDebugPanel(),
   onTireDebugPanel: () => toggleTireDebugPanel(),
   onStancePanel: () => toggleStancePanel(),
+  onCameraModeChange: (mode) => ui?.setCameraMode(mode),
   onTelemetry: (telemetry) => {
     lastTelemetry = telemetry;
     ui?.updateTelemetry(telemetry);
@@ -106,8 +118,11 @@ ui.updateTelemetry(lastTelemetry);
 // the map and its shaders are ready, so the game starts without hitches. Shown
 // again while a map that streams its model loads.
 const loadingScreen = document.querySelector<HTMLElement>('#loading');
+const loadingSkipBtn = document.querySelector<HTMLButtonElement>('#loading-skip');
+let pendingLoadingUnlock: (() => void) | null = null;
 
-function showLoading(): void {
+function showLoading(onSkipUnlock?: () => void): void {
+  pendingLoadingUnlock = onSkipUnlock ?? null;
   if (!loadingScreen) return;
   reportLoading(0, 'Yükleniyor');
   loadingScreen.classList.remove('done');
@@ -129,6 +144,13 @@ function hideLoading(): void {
   reportLoading(1, 'Hazır');
   loadingScreen?.classList.add('done');
 }
+
+loadingSkipBtn?.addEventListener('click', () => {
+  hideLoading();
+  const unlock = pendingLoadingUnlock;
+  pendingLoadingUnlock = null;
+  unlock?.();
+});
 
 engine.prepare(reportLoading)
   .catch((error: unknown) => console.warn('Ön yükleme tamamlanamadı:', error))
@@ -200,6 +222,27 @@ function toggleStancePanel(): void {
   if (!stancePanel.toggle()) return;
   const state = engine.getStanceState();
   stancePanel.syncControls(state.config, state.preset);
+}
+
+function setAllDebugPanels(open: boolean): void {
+  window.clearInterval(debugTimer);
+  debugPanel.setOpen(open);
+  tireDebugPanel.setOpen(open);
+  stancePanel.setOpen(open);
+  if (open) {
+    refreshDebugPanel();
+    debugTimer = window.setInterval(refreshDebugPanel, 250);
+    const tireState = engine.getTireDebugState();
+    tireDebugPanel.syncControls(tireState);
+    tireDebugPanel.updateTelemetry(tireState);
+    const stanceState = engine.getStanceState();
+    stancePanel.syncControls(stanceState.config, stanceState.preset);
+  }
+}
+
+function toggleAllDebugPanels(): void {
+  const allOpen = debugPanel.open && tireDebugPanel.open && stancePanel.open;
+  setAllDebugPanels(!allOpen);
 }
 
 function toggleDevCodePanel(): void {
@@ -281,11 +324,11 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
       ui?.showDevCodeStatus('Kod geçersiz. Tekrar dene.');
       return;
     }
-    save.cash += 5_000_000;
+    save.cash += 100_000_000;
     saveGame(save);
     updateUi(false);
     closeDevCodePanel();
-    ui?.showMessage('GİZLİ KOD KABUL EDİLDİ', 'Bakiyene ₺5.000.000 eklendi.', false);
+    ui?.showMessage('GİZLİ KOD KABUL EDİLDİ', 'Bakiyene ₺100.000.000 eklendi.', false);
     return;
   }
   if (action === 'start' || action === 'continue') {
@@ -293,15 +336,15 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
       openSubscreen('starter');
       return;
     }
-    setScreen(null);
     void engine.setMap(currentMap);
-    engine.setVehicle(activeVehicle);
+    if (engine.getVehicle().id !== activeVehicle.id) engine.setVehicle(activeVehicle);
+    setScreen(null);
     return;
   }
   if (action === 'starter') {
     if (save.starterChosen) {
+      if (engine.getVehicle().id !== activeVehicle.id) engine.setVehicle(activeVehicle);
       setScreen(null);
-      engine.setVehicle(activeVehicle);
     } else {
       openSubscreen('starter');
     }
@@ -320,6 +363,7 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
     activeVehicle = selected;
     saveGame(save);
     engine.setVehicle(selected);
+    if (tireDebugPanel.open) tireDebugPanel.syncControls(engine.getTireDebugState());
     setScreen(null);
     updateUi(false);
     return;
@@ -362,16 +406,61 @@ function handleAction(action: UiAction, id?: string, payload?: { playerName?: st
       updateUi();
       return;
     }
-    // Hold driving under the loading screen until the new map is in place.
+    // Hold driving under the loading screen until the new map is in place (unless skipped).
     setScreen(next === null ? 'pause' : next);
     updateUi();
-    showLoading();
+    let unlockedEarly = false;
+    showLoading(() => {
+      unlockedEarly = true;
+      if (currentMap === mapId) setScreen(next);
+    });
     engine.setMap(mapId, reportLoading)
       .catch((error: unknown) => console.warn('Harita yüklenemedi:', error))
       .finally(() => {
+        pendingLoadingUnlock = null;
         hideLoading();
-        if (currentMap === mapId) setScreen(next);
+        if (!unlockedEarly && currentMap === mapId) setScreen(next);
       });
+    return;
+  }
+  if (action === 'toggle-all-debug') {
+    toggleAllDebugPanels();
+    if (save.starterChosen && (returnScreen === null || returnScreen === 'pause')) {
+      returnScreen = null;
+      setScreen(null);
+    }
+    return;
+  }
+  if (action === 'open-debug-env') {
+    toggleDebugPanel();
+    if (save.starterChosen && (returnScreen === null || returnScreen === 'pause')) {
+      returnScreen = null;
+      setScreen(null);
+    }
+    return;
+  }
+  if (action === 'open-debug-tire') {
+    toggleTireDebugPanel();
+    if (save.starterChosen && (returnScreen === null || returnScreen === 'pause')) {
+      returnScreen = null;
+      setScreen(null);
+    }
+    return;
+  }
+  if (action === 'open-debug-stance') {
+    toggleStancePanel();
+    if (save.starterChosen && (returnScreen === null || returnScreen === 'pause')) {
+      returnScreen = null;
+      setScreen(null);
+    }
+    return;
+  }
+  if (action === 'open-dev-code') {
+    if (save.starterChosen && (returnScreen === null || returnScreen === 'pause')) {
+      returnScreen = null;
+      setScreen(null);
+    }
+    toggleDevCodePanel();
     return;
   }
   if (action === 'buy' && id) {
@@ -405,6 +494,7 @@ function purchaseVehicle(id: string): void {
   activeVehicle = vehicle;
   saveGame(save);
   engine.setVehicle(vehicle);
+  if (tireDebugPanel.open) tireDebugPanel.syncControls(engine.getTireDebugState());
   updateUi();
   ui?.showMessage(vehicle.name + ' garaja eklendi', 'Araç bedeli bakiyenden bir kez düşüldü.', false);
   purchaseLocks.delete(id);
@@ -418,6 +508,7 @@ function activateVehicle(id: string): void {
   save = { ...save, activeVehicleId: id };
   saveGame(save);
   engine.setVehicle(vehicle);
+  if (tireDebugPanel.open) tireDebugPanel.syncControls(engine.getTireDebugState());
   updateUi();
 }
 

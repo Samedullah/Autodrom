@@ -45,6 +45,8 @@ export interface EnvironmentLighting {
   wetness: number;
   /** 0..1 lightning flash right now. */
   flash: number;
+  /** True on the exact frame a new lightning bolt struck (for thunder audio). */
+  struck: boolean;
 }
 
 interface SkyKey { hour: number; zenith: string; horizon: string; ground: string; light: string }
@@ -70,9 +72,9 @@ const SUN_MAX_ELEVATION = THREE.MathUtils.degToRad(58);
 // Shadows from a sun right at the horizon would stretch across the whole map.
 const MIN_SHADOW_ELEVATION = 0.18;
 const MOON_STRENGTH = 0.05;      // moonlight as a share of full sun
-// Lightning: only in rain this heavy, every LIGHTNING_GAP seconds or so (sooner in a downpour).
-const LIGHTNING_MIN_RAIN = 0.45;
-const LIGHTNING_GAP = [7, 22] as const;
+// Lightning: only in heavy storms, spaced out so thunder rolls finish naturally with rain between strikes.
+const LIGHTNING_MIN_RAIN = 0.55;
+const LIGHTNING_GAP = [18, 48] as const;
 const FLASH_COLOR = new THREE.Color('#d6e0ff');
 /** Seconds for one flicker of a flash to fade to ~37%. */
 const FLASH_DECAY = 0.11;
@@ -101,6 +103,7 @@ export class Environment {
   private nextStrike = 0;
   /** Seconds since the last strike, and its flicker: start time and strength of each pulse. */
   private strikeAge = Infinity;
+  private pendingThunder = false;
   private readonly pulses: Array<[number, number]> = [];
   private flash = 0;
   private wetness = 0;
@@ -119,6 +122,7 @@ export class Environment {
     darkness: 0,
     wetness: 0,
     flash: 0,
+    struck: false,
   };
   private readonly sun = new THREE.Vector3();
   private readonly moon = new THREE.Vector3();
@@ -132,6 +136,7 @@ export class Environment {
   /** A lightning strike now: a few quick flickers of light and a bolt in the sky. */
   strike(): void {
     this.strikeAge = 0;
+    this.pendingThunder = true;
     this.pulses.length = 0;
     const count = 2 + Math.floor(Math.random() * 3);
     let start = 0;
@@ -164,10 +169,10 @@ export class Environment {
       if (this.nextStrike <= 0) {
         this.strike();
         const heavy = THREE.MathUtils.smoothstep(state.rain, LIGHTNING_MIN_RAIN, 1);
-        this.nextStrike = THREE.MathUtils.lerp(LIGHTNING_GAP[1], LIGHTNING_GAP[0], heavy) * (0.5 + Math.random());
+        this.nextStrike = THREE.MathUtils.lerp(LIGHTNING_GAP[1], LIGHTNING_GAP[0], heavy) * (0.75 + Math.random() * 0.65);
       }
     } else {
-      this.nextStrike = LIGHTNING_GAP[0] * Math.random();
+      this.nextStrike = 10 + Math.random() * 14;
     }
     this.strikeAge += dt;
     // Each pulse lights up at once and dies away in a few hundredths of a second.
@@ -229,6 +234,8 @@ export class Environment {
     // Lightning: the clouds light up blue-white and fill every shadow for an instant.
     const flash = this.flash;
     out.flash = flash;
+    out.struck = this.pendingThunder;
+    this.pendingThunder = false;
     if (flash > 0) {
       // The sky stays darker than the bolt so the bolt still reads against it.
       out.sky.zenith.lerp(FLASH_COLOR, flash * 0.3);
@@ -424,19 +431,29 @@ export class RainField {
  * darker. Dry values are remembered on each material the first time.
  */
 export function applyWetness(root: THREE.Object3D, wetness: number): void {
-  root.traverse((object) => {
-    const material = (object as THREE.Mesh).material;
-    if (!material) return;
-    for (const entry of Array.isArray(material) ? material : [material]) {
-      const surface = entry as THREE.MeshStandardMaterial;
-      if (!surface.isMeshStandardMaterial) continue;
-      if (surface.userData.dryRoughness === undefined) {
-        surface.userData.dryRoughness = surface.roughness;
-        surface.userData.dryColor = surface.color.clone();
+  let surfaces = root.userData.wettableMaterials as THREE.MeshStandardMaterial[] | undefined;
+  if (!surfaces) {
+    const collected = new Set<THREE.MeshStandardMaterial>();
+    root.traverse((object) => {
+      const material = (object as THREE.Mesh).material;
+      if (!material) return;
+      for (const entry of Array.isArray(material) ? material : [material]) {
+        const surface = entry as THREE.MeshStandardMaterial;
+        if (!surface.isMeshStandardMaterial) continue;
+        if (surface.userData.dryRoughness === undefined) {
+          surface.userData.dryRoughness = surface.roughness;
+          surface.userData.dryColor = surface.color.clone();
+        }
+        collected.add(surface);
       }
-      const dry = surface.userData.dryRoughness as number;
-      surface.roughness = Math.max(0.06, THREE.MathUtils.lerp(dry, dry * 0.3, wetness));
-      surface.color.copy(surface.userData.dryColor as THREE.Color).multiplyScalar(1 - 0.3 * wetness);
-    }
-  });
+    });
+    surfaces = [...collected];
+    root.userData.wettableMaterials = surfaces;
+  }
+  for (let i = 0; i < surfaces.length; i += 1) {
+    const surface = surfaces[i];
+    const dry = surface.userData.dryRoughness as number;
+    surface.roughness = Math.max(0.06, THREE.MathUtils.lerp(dry, dry * 0.3, wetness));
+    surface.color.copy(surface.userData.dryColor as THREE.Color).multiplyScalar(1 - 0.3 * wetness);
+  }
 }

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CLASS_LABELS, MAP_LABELS, STARTER_VEHICLES, VEHICLES, type CarClass, type MapId, type VehicleSpec } from './data';
 import type { GameSettings, SaveData } from './save';
-import type { DrivingControl, Telemetry } from './engine';
+import type { CameraMode, DrivingControl, Telemetry } from './engine';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel } from './vehicle';
 
@@ -9,6 +9,7 @@ export type Screen = 'main' | 'starter' | 'garage' | 'maps' | 'settings' | 'paus
 export type UiAction = 'start' | 'continue' | 'starter' | 'garage' | 'store' | 'maps' | 'settings' | 'pause'
   | 'resume' | 'main' | 'select-starter' | 'buy' | 'activate' | 'choose-map' | 'close' | 'fullscreen' | 'reset-position'
   | 'preview-car' | 'filter-class' | 'clear-filters' | 'redeem-code' | 'close-dev-code' | 'shift-up' | 'shift-down' | 'toggle-tcs'
+  | 'toggle-all-debug' | 'open-debug-env' | 'open-debug-tire' | 'open-debug-stance' | 'open-dev-code'
   | 'multiplayer' | 'multiplayer-create' | 'multiplayer-join' | 'multiplayer-leave' | 'copy-room';
 
 export interface UiSnapshot {
@@ -52,6 +53,16 @@ export class GameInterface {
   private readonly mapValue: HTMLElement;
   private readonly incomeToast: HTMLElement;
   private readonly messageToast: HTMLElement;
+  private readonly driveHint: HTMLElement;
+  private readonly driftHud: HTMLElement;
+  private readonly driftLabel: HTMLElement;
+  private readonly driftAngle: HTMLElement;
+  private readonly driftMultiplierEl: HTMLElement;
+  private readonly driftScoreEl: HTMLElement;
+  private readonly driftPayoutEl: HTMLElement;
+  private readonly driftBarFill: HTMLElement;
+  private readonly driftTimerEl: HTMLElement;
+  private driftWasActive = false;
   private readonly devCodeOverlay: HTMLElement;
   private readonly devCodeInput: HTMLInputElement;
   private readonly devCodeStatus: HTMLElement;
@@ -85,7 +96,18 @@ export class GameInterface {
           '<span class="tach-speed"><strong id="speed-value" aria-label="Hız">0</strong><small>KM/SA</small></span>' +
         '</div>' +
       '</div>' +
-      '<div class="drive-hint"><span>W</span><span>A</span><span>S</span><span>D</span><i>GAZ / DİREKSİYON</i><em></em><kbd>Q</kbd><kbd>E</kbd><i>VİTES</i><em></em><kbd>SPACE</kbd><i>EL FRENİ</i></div>' +
+      '<div class="drift-hud" id="drift-hud" aria-live="off">' +
+        '<div class="drift-hud-top">' +
+          '<span class="drift-hud-label" id="drift-label">DRİFT SERİSİ</span>' +
+          '<div class="drift-hud-badges"><span class="drift-angle" id="drift-angle">0°</span><b class="drift-mult" id="drift-mult">×1.0</b></div>' +
+        '</div>' +
+        '<div class="drift-hud-main"><strong id="drift-score">0</strong><small id="drift-payout">≈ +₺0 (%30)</small></div>' +
+        '<div class="drift-hud-foot">' +
+          '<div class="drift-bar-track"><i id="drift-bar-fill"></i></div>' +
+          '<span id="drift-timer">5.0 sn</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="drive-hint" id="drive-hint"><span>W</span><span>A</span><span>S</span><span>D</span><i>GAZ / DİREKSİYON</i><em></em><kbd>Q</kbd><kbd>E</kbd><i>VİTES</i><em></em><kbd>SPACE</kbd><i>EL FRENİ</i><em></em><kbd>C</kbd><kbd>X</kbd><i>KAMERA</i></div>' +
       '<div class="touch-controls" aria-label="Dokunmatik sürüş kontrolleri">' +
         '<div class="touch-steering" aria-label="Direksiyon"><button type="button" class="touch-button steer-button" data-control="left" aria-label="Sola dön"><span>‹</span></button><button type="button" class="touch-button steer-button" data-control="right" aria-label="Sağa dön"><span>›</span></button></div>' +
         '<div class="touch-pedals" aria-label="Pedallar"><button type="button" class="touch-button brake-button" data-control="brake" aria-label="Fren"><span>FREN</span></button><div class="touch-pedal-stack"><button type="button" class="touch-button handbrake-button" data-control="handbrake" aria-label="El freni"><span>EL FRENİ</span></button><button type="button" class="touch-button gas-button" data-control="gas" aria-label="Gaz"><span>GAZ</span></button></div></div>' +
@@ -113,6 +135,15 @@ export class GameInterface {
     this.mapValue = host.querySelector('#map-value') as HTMLElement;
     this.incomeToast = host.querySelector('#income-toast') as HTMLElement;
     this.messageToast = host.querySelector('#message-toast') as HTMLElement;
+    this.driveHint = host.querySelector('#drive-hint') as HTMLElement;
+    this.driftHud = host.querySelector('#drift-hud') as HTMLElement;
+    this.driftLabel = host.querySelector('#drift-label') as HTMLElement;
+    this.driftAngle = host.querySelector('#drift-angle') as HTMLElement;
+    this.driftMultiplierEl = host.querySelector('#drift-mult') as HTMLElement;
+    this.driftScoreEl = host.querySelector('#drift-score') as HTMLElement;
+    this.driftPayoutEl = host.querySelector('#drift-payout') as HTMLElement;
+    this.driftBarFill = host.querySelector('#drift-bar-fill') as HTMLElement;
+    this.driftTimerEl = host.querySelector('#drift-timer') as HTMLElement;
     this.devCodeOverlay = host.querySelector('#dev-code-overlay') as HTMLElement;
     this.devCodeInput = host.querySelector('#dev-code-input') as HTMLInputElement;
     this.devCodeStatus = host.querySelector('#dev-code-status') as HTMLElement;
@@ -260,6 +291,26 @@ export class GameInterface {
     this.tachNeedle.style.transform = 'rotate(' + needleAngle.toFixed(1) + 'deg)';
     this.tach.classList.toggle('limiter', limiter);
     this.tcsLamp.classList.toggle('intervening', telemetry.tcsActive);
+    const combo = telemetry.driftCombo;
+    if (combo?.active) {
+      this.driftWasActive = true;
+      this.driftHud.classList.add('is-active');
+      this.driftHud.classList.toggle('is-cooling', !combo.sliding);
+      this.driftHud.classList.toggle('is-transition', combo.transitionFlash);
+      this.driftLabel.textContent = combo.transitionFlash ? 'GEÇİŞ BONUS!' : combo.sliding ? 'DRİFT SERİSİ' : 'SERİ SÜRESİ';
+      this.driftAngle.textContent = combo.angleDeg + '°';
+      this.driftMultiplierEl.textContent = '×' + combo.multiplier.toFixed(1);
+      this.driftMultiplierEl.classList.toggle('tier-mid', combo.multiplier >= 2 && combo.multiplier < 3.5);
+      this.driftMultiplierEl.classList.toggle('tier-high', combo.multiplier >= 3.5);
+      this.driftScoreEl.textContent = money.format(combo.score);
+      this.driftPayoutEl.textContent = '≈ +₺' + money.format(Math.max(1, Math.round(combo.score * 0.3))) + ' (%30)';
+      const ratio = Math.max(0, Math.min(1, combo.remainingSeconds / 5));
+      this.driftBarFill.style.transform = 'scaleX(' + ratio.toFixed(3) + ')';
+      this.driftTimerEl.textContent = combo.sliding ? 'AKTİF' : combo.remainingSeconds.toFixed(1) + ' sn';
+    } else if (this.driftWasActive) {
+      this.driftWasActive = false;
+      this.driftHud.classList.remove('is-active', 'is-cooling', 'is-transition');
+    }
   }
 
   setTcsEnabled(enabled: boolean): void {
@@ -267,6 +318,25 @@ export class GameInterface {
     this.tcsLamp.setAttribute('aria-pressed', String(enabled));
     this.tcsLamp.setAttribute('aria-label', enabled ? 'Çekiş kontrolünü kapat (T)' : 'Çekiş kontrolünü aç (T)');
     if (!enabled) this.tcsLamp.classList.remove('intervening');
+  }
+
+  private lastCameraMode: CameraMode = 'chase';
+
+  setCameraMode(mode: CameraMode): void {
+    const prev = this.lastCameraMode;
+    this.lastCameraMode = mode;
+    if (mode === 'free') {
+      this.driveHint.innerHTML = '<span>W</span><span>A</span><span>S</span><span>D</span><i>UÇUŞ</i><em></em><kbd>SPACE</kbd><kbd>Q</kbd><i>YÜKSEL / ALÇAL</i><em></em><kbd>X</kbd><i>AÇIYI KİLİTLE</i><em></em><kbd>C</kbd><i>SÜRÜŞE DÖN</i>';
+      this.showMessage('SERBEST KAMERA', 'Açıyı ayarla · X ile bu açıyı araca kilitleyip sür · C ile çık', false);
+    } else if (mode === 'locked') {
+      this.driveHint.innerHTML = '<span>W</span><span>A</span><span>S</span><span>D</span><i>GAZ / DİREKSİYON</i><em></em><kbd>Q</kbd><kbd>E</kbd><i>VİTES</i><em></em><kbd>X</kbd><i>KİLİDİ AÇ</i><em></em><kbd>C</kbd><i>AÇIYI DÜZENLE</i>';
+      this.showMessage('KAMERA KİLİTLENDİ', 'Kamera açısı araca sabitlendi · X ile kilidi aç · C ile tekrar düzenle', false);
+    } else {
+      this.driveHint.innerHTML = '<span>W</span><span>A</span><span>S</span><span>D</span><i>GAZ / DİREKSİYON</i><em></em><kbd>Q</kbd><kbd>E</kbd><i>VİTES</i><em></em><kbd>SPACE</kbd><i>EL FRENİ</i><em></em><kbd>C</kbd><kbd>X</kbd><i>KAMERA</i>';
+      if (prev === 'locked') {
+        this.showMessage('TAKİP KAMERASI', 'Kamera kilidi kaldırıldı, standart takip kamerasına dönüldü.', false);
+      }
+    }
   }
 
   setMultiplayerInfo(status: string, connected: boolean, roomCode = '', playerCount = 1): void {
@@ -286,13 +356,13 @@ export class GameInterface {
     if (count) count.textContent = this.multiplayerPlayerCount + ' / 8 oyuncu';
   }
 
-  showIncome(amount: number): void {
+  showIncome(amount: number, label = 'SÜRÜŞ GELİRİ'): void {
     window.clearTimeout(this.incomeHideTimeout);
-    this.incomeToast.innerHTML = '<b>+₺' + money.format(amount) + '</b><span>SÜRÜŞ GELİRİ</span>';
+    this.incomeToast.innerHTML = '<b>+₺' + money.format(amount) + '</b><span>' + escapeHtml(label) + '</span>';
     this.incomeToast.classList.remove('show');
     void this.incomeToast.offsetWidth;
     this.incomeToast.classList.add('show');
-    this.incomeHideTimeout = window.setTimeout(() => this.incomeToast.classList.remove('show'), 1000);
+    this.incomeHideTimeout = window.setTimeout(() => this.incomeToast.classList.remove('show'), label === 'SÜRÜŞ GELİRİ' ? 1000 : 2200);
   }
 
   showMessage(title: string, body: string, error: boolean): void {
@@ -462,7 +532,7 @@ export class GameInterface {
         '<div class="detail-preview" data-preview></div>' +
         '<div class="detail-heading"><div><div class="eyebrow">' + escapeHtml(selected.brand + ' · ' + selected.subtitle).toLocaleUpperCase('tr-TR') + '</div><h2>' + escapeHtml(selected.name) + '</h2></div><div class="detail-market"><small>OYUN FİYATI</small><b>₺' + money.format(selected.price) + '</b></div></div>' +
         '<div class="detail-specs">' + specBar('MAKS. HIZ', selected.maxSpeed, 360, 'km/sa') + specBar('HIZLANMA', selected.acceleration, 27, 'm/s²') + specBar('FREN', selected.braking, 26, 'm/s²') + specBar('YOL TUTUŞU', selected.handling, 1, '/10') + '</div>' +
-        facts + '<div class="detail-game-note">OYUN AYARI: ' + selected.power + ' güç · ' + selected.maxSpeed + ' km/sa azami hız · ' + selected.acceleration + ' hızlanma</div>' + priceReference +
+        facts + '<div class="detail-game-note">OYUN AYARI: ' + selected.power + ' güç · ' + selected.maxSpeed + ' km/sa azami hız · ' + selected.acceleration + ' hızlanma · ' + (selected.category === 'SUPER' || selected.bodyStyle === 'super' ? 'Semi-Slick lastik' : 'Sport lastik') + '</div>' + priceReference +
         '<div class="detail-action">' + purchase + '<small>' + (isOwned ? (isActive ? 'Aktif araç olarak seçildi.' : 'Bu araç garajında kayıtlı.') : 'Satın alma tutarı tek seferde bakiyenden düşer.') + '</small></div></section></div>';
   }
 
@@ -533,10 +603,17 @@ export class GameInterface {
         '<label class="setting-row"><span><b>Drift izleri</b><small>Sürüş efektlerini göster</small></span><input type="checkbox" data-setting="effects"' + checked(settings.effects) + '></label>' +
         '<label class="setting-row"><span><b>Kare hızı sınırı</b><small>Akıcılık ve güç tüketimi dengesi</small></span><select data-setting="fpsLimit"><option value="30"' + selected(settings.fpsLimit === 30) + '>30 FPS</option><option value="60"' + selected(settings.fpsLimit === 60) + '>60 FPS</option><option value="0"' + selected(settings.fpsLimit === 0) + '>Sınırsız</option></select></label>' +
         '<button class="setting-row fullscreen-row" data-action="fullscreen"><span><b>Tam ekran</b><small>Tarayıcının desteklediği ekran görünümü</small></span><i>↗</i></button>' +
+        '<button class="setting-row fullscreen-row debug-all-row" type="button" data-action="toggle-all-debug"><span><b>Tüm Debug Menülerini Aç / Kapat</b><small>Ortam (P) + Lastik Fiziği (L) + Stance & Süspansiyon (I) panelleri</small></span><i>⌘</i></button>' +
+        '<div class="settings-debug-shortcuts">' +
+          '<button type="button" data-action="open-debug-env">Ortam (P)</button>' +
+          '<button type="button" data-action="open-debug-tire">Lastik (L)</button>' +
+          '<button type="button" data-action="open-debug-stance">Stance (I)</button>' +
+          '<button type="button" data-action="open-dev-code">Dev Code (M)</button>' +
+        '</div>' +
       '</section><section class="settings-section"><div class="settings-section-head"><span>02</span><div><b>KAMERA & KONTROLLER</b><small>Takip hissini ve sürüşü ayarla</small></div></div>' +
         '<label class="setting-row"><span><b>Vites sistemi</b><small>Otomatikte 6.700 dev/dak yükseltir, uygun devirde küçültür</small></span><select data-setting="transmissionMode"><option value="manual"' + selected(settings.transmissionMode === 'manual') + '>Manuel</option><option value="automatic"' + selected(settings.transmissionMode === 'automatic') + '>Otomatik</option></select></label>' +
         '<label class="setting-row range-row"><span><b>Kamera takibi</b><small>Yumuşak takip <strong data-camera-value>' + percent.format(settings.cameraFollow * 100) + '%</strong></small></span><input type="range" min="4" max="24" value="' + Math.round(settings.cameraFollow * 100) + '" data-setting="cameraFollow"></label>' +
-        '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>T</kbd><span>Çekiş kontrolü (TCS)</span></div><div><kbd>P</kbd><span>Geliştirici paneli (saat, yağmur)</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
+        '<div class="control-guide"><div><kbd>W</kbd><span>Gaz</span></div><div><kbd>S</kbd><span>Fren / geri</span></div><div><kbd>A</kbd><kbd>D</kbd><span>Direksiyon</span></div><div><kbd>Q</kbd><kbd>E</kbd><span>Vites (dokunmatik − / +)</span></div><div><kbd>SPACE</kbd><span>El freni & drift</span></div><div><kbd>C</kbd><kbd>X</kbd><span>Serbest kamera / Açıyı kilitle</span></div><div><kbd>T</kbd><span>Çekiş kontrolü (TCS)</span></div><div><kbd>P</kbd><span>Geliştirici paneli (saat, yağmur)</span></div><div><kbd>ESC</kbd><span>Duraklat</span></div></div>' +
       '</section></div><div class="settings-bottom"><span>AYARLAR BU TARAYICIDA KAYDEDİLİR</span><button class="button-primary compact" data-action="close"><span>UYGULA</span><b>✓</b></button></div></div>';
   }
 

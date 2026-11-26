@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { ECONOMY, MAP_LABELS, VEHICLES, WORLD_SCALE, type MapId, type VehicleSpec } from './data';
 import { IncomeClock } from './economy';
 import type { GameSettings } from './save';
-import { brakeLampCenters, createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleMaterialQuality, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
+import { createVehicleVisual, disposeVehicleVisual, installGeneratedModel, modelDownloadProgress, setVehicleLights, setVehicleMaterialQuality, setVehicleSuspension, setVehicleWheelSpin, type VehicleVisual } from './vehicle';
 import { VehicleAudio } from './vehicleAudio';
 import { TireSmoke } from './tireSmoke';
 import { MotionBlur } from './motionBlur';
@@ -22,22 +22,37 @@ import type { WallGrid } from './terrain';
 export type { Gear } from './drivetrain';
 export type DrivingControl = 'gas' | 'brake' | 'left' | 'right' | 'handbrake';
 
+export interface DriftComboState {
+  active: boolean;
+  sliding: boolean;
+  score: number;
+  multiplier: number;
+  remainingSeconds: number;
+  angleDeg: number;
+  transitionFlash: boolean;
+}
+
 export interface Telemetry {
   speedKmh: number;
   gear: Gear;
   rpm: number;
   drifting: boolean;
   tcsActive: boolean;
+  driftCombo?: DriftComboState;
 }
+
+export type CameraMode = 'chase' | 'free' | 'locked';
 
 export interface EngineCallbacks {
   onIncome: (amount: number) => void;
+  onDriftComplete?: (score: number, payout: number, maxMultiplier: number) => void;
   onMissionComplete: (amount: number) => void;
   onMissionFailed: () => void;
   onDevCode: () => void;
   onDebugPanel: () => void;
   onTireDebugPanel?: () => void;
   onStancePanel?: () => void;
+  onCameraModeChange?: (mode: CameraMode) => void;
   onToggleTcs: () => void;
   onTelemetry: (telemetry: Telemetry) => void;
   onEscape: () => void;
@@ -64,13 +79,11 @@ const SMOKE_EMIT_INTERVAL = 0.03;
 const MODEL_LOAD_TIMEOUT_MS = 30000;
 // Headlight beam strength at full darkness (candela).
 const HEADLIGHT_INTENSITY = 1800;
-// Red light a lit brake lamp throws on the bumper, paint and road around it.
-const BRAKE_SPILL_INTENSITY = 1.6;
-const BRAKE_SPILL_RANGE = 3.5;
-// Fallback distance behind the car when a model has no detected brake lamp meshes.
-const BRAKE_SPILL_BEHIND = 0.15;
-// Seconds between re-bakes of the sky reflections while the light changes.
-const ENVIRONMENT_BAKE_INTERVAL = 1.2;
+// Soft red ground glow behind the rear bumper while braking (replaces dynamic PointLights
+// so braking never alters scene light counts or triggers shader recompilation).
+const BRAKE_SPILL_OPACITY = 0.52;
+// Seconds between automatic re-bakes of the sky reflections while the day/night clock runs.
+const ENVIRONMENT_BAKE_INTERVAL = 20;
 // Distance between wall checks along a frame's move (m); walls are 1 m cells.
 const WALL_CHECK_STEP = 0.5;
 // Chase camera framing, set on the 911 GT3 RS (5.48 m long, 1.58 m tall in
@@ -91,6 +104,11 @@ const MOTION_BLUR_MAX = 0.075;
 // cloud after this many seconds. It dies back quicker once grip returns.
 const SMOKE_BUILD_TIME = 1.6;
 const SMOKE_DECAY_TIME = 0.4;
+// Drift combo scoring: closes out after 5 s without drifting and pays 30% of score as cash.
+const DRIFT_COMBO_TIMEOUT = 5.0;
+const DRIFT_PAYOUT_SHARE = 0.30;
+const DRIFT_MAX_MULTIPLIER = 5.0;
+const DRIFT_SECONDS_PER_STEP = 2.4;
 // The sun's shadow camera covers this many metres around the player's car and
 // follows it, instead of covering the whole map at once.
 
@@ -117,9 +135,9 @@ const SUSPENSION = {
   substep: 1 / 240,
 } as const;
 function pixelRatioLimit(quality: GameSettings['quality']): number {
-  if (quality === 'ultra') return 2.25;
-  if (quality === 'high') return 1.25;
-  return quality === 'medium' ? 1 : 0.9;
+  if (quality === 'ultra') return 1.5;
+  if (quality === 'high') return 1.1;
+  return quality === 'medium' ? 0.95 : 0.8;
 }
 
 /**
@@ -142,7 +160,7 @@ function shadowHalfExtent(quality: GameSettings['quality']): number {
 }
 
 function shadowMapResolution(quality: GameSettings['quality']): number {
-  if (quality === 'ultra') return 3072;
+  if (quality === 'ultra') return 2048;
   if (quality === 'high') return 1536;
   return 1024;
 }
@@ -164,15 +182,11 @@ export class DriveEngine {
   private readonly sunOffset = SUN_OFFSET.clone();
   private readonly sunForward = new THREE.Vector3();
   private readonly headlight = new THREE.SpotLight('#fff3df', 0, 95, 0.52, 0.6, 1.4);
-  // One per rear lamp: the red spill on the car and road while braking.
-  private readonly brakeSpill = [
-    new THREE.PointLight('#ff1408', 0, BRAKE_SPILL_RANGE, 2),
-    new THREE.PointLight('#ff1408', 0, BRAKE_SPILL_RANGE, 2),
-  ];
+  // Zero-light-cost additive red ground spill behind the rear bumper while braking.
+  private readonly brakeSpillMaterial: THREE.MeshBasicMaterial;
+  private readonly brakeSpillMesh: THREE.Mesh;
   // Spill strength by time of day: faint in sunlight, full at night.
-  private brakeSpillScale = 0.08;
-  /** Lamp set the spill lights were last placed at (placed again when the model changes). */
-  private brakeSpillLamps: VehicleVisual['lights'] | null = null;
+  private brakeSpillScale = 0.14;
   private fogBase = { near: 108, far: 950 };
   private bakedHour = 0;
   private bakeForced = true;
@@ -213,6 +227,22 @@ export class DriveEngine {
   private cameraZoom = 1;
   private readonly cameraMotion = new CameraMotion();
   private cameraGear: Gear = 1;
+  private freeCameraActive = false;
+  private cameraLocked = false;
+  private lockedDistance = 0;
+  private readonly lockedLocalPos = new THREE.Vector3();
+  private readonly lockedLocalQuat = new THREE.Quaternion();
+  private readonly lockedBasisQuat = new THREE.Quaternion();
+  private readonly lockedBasisEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+  private readonly freeCamPos = new THREE.Vector3();
+  private readonly freeCamVel = new THREE.Vector3();
+  private readonly freeCamDir = new THREE.Vector3();
+  private readonly freeCamRight = new THREE.Vector3();
+  private readonly freeCamMove = new THREE.Vector3();
+  private readonly shadowFocus = new THREE.Vector3();
+  private freeCamYaw = 0;
+  private freeCamPitch = 0;
+  private freeCamSpeed = 32;
   // Body-frame acceleration measured by the suspension each frame (m/s², clamped).
   private bodyAccelLong = 0;
   private bodyAccelLat = 0;
@@ -230,6 +260,25 @@ export class DriveEngine {
   private wheelTravel = 0;
   private rearWheelTravel = 0;
   private driftValue = 0;
+  private driftScore = 0;
+  private driftMultiplier = 1;
+  private driftPeakMultiplier = 1;
+  private driftComboProgress = 0;
+  private driftIdleTimer = 0;
+  private driftSide: -1 | 0 | 1 = 0;
+  private driftSideHold = 0;
+  private driftTransitionTimer = 0;
+  private driftCurrentAngleDeg = 0;
+  private driftSlidingNow = false;
+  private readonly driftComboState: DriftComboState = {
+    active: false,
+    sliding: false,
+    score: 0,
+    multiplier: 1,
+    remainingSeconds: DRIFT_COMBO_TIMEOUT,
+    angleDeg: 0,
+    transitionFlash: false,
+  };
   private readonly forward = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
   private readonly cameraTarget = new THREE.Vector3();
@@ -344,23 +393,33 @@ export class DriveEngine {
     this.scene.add(this.atmosphere.dome);
     this.environment = new Environment(this.settings.quality);
     this.scene.add(this.environment.rain.mesh, this.environment.bolt.mesh);
-    // Headlights: always in the scene (adding a light later would recompile
-    // every material), dark by day.
     this.headlight.castShadow = false;
+    this.headlight.visible = false;
     this.carRoot.add(this.headlight, this.headlight.target);
-    // Brake spill lights: likewise always present, dark until the brake is pressed.
-    // Off on low quality: a hidden light leaves every shader, a dark one would not.
-    for (const light of this.brakeSpill) {
-      light.castShadow = false;
-      light.visible = this.settings.quality !== 'low';
-      this.carRoot.add(light);
-    }
+    this.brakeSpillMaterial = new THREE.MeshBasicMaterial({
+      map: createBrakeSpillTexture(),
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      toneMapped: false,
+      fog: false,
+    });
+    this.brakeSpillMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.brakeSpillMaterial);
+    this.brakeSpillMesh.name = 'brake-spill';
+    this.brakeSpillMesh.rotation.x = -Math.PI / 2;
+    this.brakeSpillMesh.renderOrder = 2;
+    this.brakeSpillMesh.visible = false;
+    this.brakeSpillMesh.castShadow = false;
+    this.brakeSpillMesh.receiveShadow = false;
+    this.brakeSpillMesh.userData.castsShadow = false;
+    this.carRoot.add(this.brakeSpillMesh);
+    this.placeBrakeSpill();
     this.worldData = buildWorld(mapId, this.settings);
     this.scene.add(this.worldData.root);
     this.visual = createVehicleVisual(vehicle);
     this.carRoot.add(this.visual.root);
     this.initialModel = installGeneratedModel(this.visual, vehicle).then((ok) => {
-      this.brakeSpillLamps = null;
       this.applyStanceVisuals();
       return ok;
     });
@@ -374,7 +433,7 @@ export class DriveEngine {
     this.renderer.setPixelRatio(renderPixelRatio(this.settings.quality, this.settings.resolutionScale));
     this.renderer.setSize(host.clientWidth, host.clientHeight, false);
     this.renderer.shadowMap.enabled = this.settings.shadows && this.settings.quality !== 'low';
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = this.settings.quality === 'medium' ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
     // Frames draw several passes (shadows, blur, bloom); count them all, reset once per frame.
     this.renderer.info.autoReset = false;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -383,13 +442,15 @@ export class DriveEngine {
     // Image-based lighting from the sky: reflections and ambient for every PBR material.
     this.scene.environment = this.atmosphere.environmentMap(this.renderer);
     this.scene.environmentIntensity = lightingFor(this.settings.quality).environment;
-    // The offscreen target does not get the canvas' MSAA, so ask for its own.
-    this.motionBlur = new MotionBlur(this.renderer, antialias ? 4 : 0);
+    // MotionBlur only runs past 90 km/h on outer edges; skipping 4x MSAA resolve on the HalfFloat
+    // target saves massive fillrate on high-DPI displays.
+    this.motionBlur = new MotionBlur(this.renderer, this.settings.quality === 'ultra' ? 2 : 0);
     this.lampBloom = new LampBloom(this.renderer);
     this.lensDrops = new LensDrops(this.renderer);
     this.renderer.domElement.className = 'drive-canvas';
     this.renderer.domElement.setAttribute('aria-label', 'Sürüş alanı');
     this.renderer.domElement.addEventListener('wheel', this.onCameraWheel, { passive: false });
+    this.renderer.domElement.addEventListener('contextmenu', this.onContextMenu);
     this.host.appendChild(this.renderer.domElement);
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.host);
@@ -440,7 +501,35 @@ export class DriveEngine {
       if (!event.repeat) this.callbacks.onToggleTcs();
       return;
     }
+    if (key === 'c' || event.code === 'KeyC') {
+      if (!event.repeat && this.drivingEnabled) {
+        event.preventDefault();
+        if (this.freeCameraActive) {
+          this.cameraLocked = false;
+          this.setFreeCamera(false);
+        } else {
+          this.setFreeCamera(true);
+        }
+      }
+      return;
+    }
+    if (key === 'x' || event.code === 'KeyX') {
+      if (!event.repeat && this.drivingEnabled) {
+        event.preventDefault();
+        if (this.freeCameraActive || !this.cameraLocked) {
+          this.lockCurrentCamera();
+        } else {
+          this.unlockCamera();
+        }
+      }
+      return;
+    }
     if (key === 'e' || key === 'q') {
+      if (this.freeCameraActive && this.drivingEnabled) {
+        event.preventDefault();
+        this.keys.add(key);
+        return;
+      }
       if (!event.repeat && this.drivingEnabled) {
         event.preventDefault();
         if (key === 'e') this.shiftUp();
@@ -453,8 +542,8 @@ export class DriveEngine {
       if (this.drivingEnabled) this.keys.add(key);
       return;
     }
-    if (['w', 'a', 's', 'd', ' '].includes(key)) {
-      event.preventDefault();
+    if (['w', 'a', 's', 'd', ' ', 'shift', 'control'].includes(key)) {
+      if (key !== 'shift' && key !== 'control') event.preventDefault();
       if (this.drivingEnabled) this.keys.add(key);
     }
   };
@@ -463,14 +552,24 @@ export class DriveEngine {
   private clearKeys = (): void => { this.keys.clear(); this.touchKeys.clear(); this.endCameraDrag(); };
   private onAudioGesture = (): void => { void this.vehicleAudio.unlock(); };
 
+  private onContextMenu = (event: MouseEvent): void => {
+    if (this.freeCameraActive) event.preventDefault();
+  };
+
   private onCameraWheel = (event: WheelEvent): void => {
     if (!this.drivingEnabled) return;
     event.preventDefault();
+    if (this.freeCameraActive) {
+      this.freeCamSpeed = THREE.MathUtils.clamp(this.freeCamSpeed * Math.exp(-event.deltaY * 0.0012), 4, 240);
+      return;
+    }
+    if (this.cameraLocked) return;
     this.cameraZoom = THREE.MathUtils.clamp(this.cameraZoom * Math.exp(event.deltaY * 0.001), 0.55, 2.5);
   };
 
   private onCameraPointerDown = (event: PointerEvent): void => {
-    if (!this.drivingEnabled || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    const allowedButton = event.button === 0 || (this.freeCameraActive && event.button === 2);
+    if (!this.drivingEnabled || (this.cameraLocked && !this.freeCameraActive) || (event.pointerType === 'mouse' && !allowedButton)) return;
     const target = event.target;
     if (target instanceof Element && target.closest('button, input, select, textarea, a, [data-action], [data-control]')) return;
     if (!(target instanceof Element) || !target.closest('.drive-canvas')) return;
@@ -508,6 +607,11 @@ export class DriveEngine {
     const deltaY = event.clientY - this.cameraPointerY;
     this.cameraPointerX = event.clientX;
     this.cameraPointerY = event.clientY;
+    if (this.freeCameraActive) {
+      this.freeCamYaw = Math.atan2(Math.sin(this.freeCamYaw - deltaX * 0.0055), Math.cos(this.freeCamYaw - deltaX * 0.0055));
+      this.freeCamPitch = THREE.MathUtils.clamp(this.freeCamPitch - deltaY * 0.0055, -1.52, 1.52);
+      return;
+    }
     this.cameraOrbit = Math.atan2(Math.sin(this.cameraOrbit - deltaX * 0.008), Math.cos(this.cameraOrbit - deltaX * 0.008));
     this.cameraElevation = THREE.MathUtils.clamp(this.cameraElevation - deltaY * 0.006, 0.12, 0.9);
   };
@@ -555,6 +659,68 @@ export class DriveEngine {
     return this.sim.tcsEnabled;
   }
 
+  isFreeCamera(): boolean {
+    return this.freeCameraActive;
+  }
+
+  setFreeCamera(active: boolean): void {
+    if (this.freeCameraActive === active) return;
+    this.freeCameraActive = active;
+    this.sceneNeedsRender = true;
+    if (active) {
+      this.camera.getWorldDirection(this.freeCamDir);
+      this.freeCamPos.copy(this.camera.position);
+      this.freeCamPitch = Math.asin(THREE.MathUtils.clamp(this.freeCamDir.y, -0.999, 0.999));
+      this.freeCamYaw = Math.atan2(-this.freeCamDir.x, -this.freeCamDir.z);
+      this.freeCamVel.set(0, 0, 0);
+      this.callbacks.onCameraModeChange?.('free');
+    } else {
+      this.keys.delete('q');
+      this.keys.delete('e');
+      this.updateCamera(0, true);
+      this.updateShadowFrustum();
+      this.callbacks.onCameraModeChange?.(this.cameraLocked ? 'locked' : 'chase');
+    }
+  }
+
+  private computeLockedBasis(distance: number): THREE.Quaternion {
+    // Close mounts (cockpit, hood, wheel arch < 3.5 m) track full body pitch & roll so bodywork
+    // never clips the lens; outer chase/drone rigs damp suspension bounce over longer lever arms.
+    const pitchShare = 1 - 0.72 * THREE.MathUtils.smoothstep(distance, 3.5, 11.0);
+    const rollShare = 1 - 0.82 * THREE.MathUtils.smoothstep(distance, 3.5, 11.0);
+    this.lockedBasisEuler.set(-this.bodyPitch * pitchShare, this.yaw, this.bodyRoll * rollShare, 'YXZ');
+    return this.lockedBasisQuat.setFromEuler(this.lockedBasisEuler);
+  }
+
+  lockCurrentCamera(): void {
+    this.lockedDistance = this.camera.position.distanceTo(this.carRoot.position);
+    const basisInv = this.computeLockedBasis(this.lockedDistance).clone().invert();
+    this.lockedLocalPos.copy(this.camera.position).sub(this.carRoot.position).applyQuaternion(basisInv);
+    this.lockedLocalQuat.copy(basisInv).multiply(this.camera.quaternion);
+    this.cameraLocked = true;
+    if (this.freeCameraActive) {
+      this.freeCameraActive = false;
+      this.keys.delete('q');
+      this.keys.delete('e');
+    }
+    this.endCameraDrag();
+    this.updateShadowFrustum();
+    this.sceneNeedsRender = true;
+    this.callbacks.onCameraModeChange?.('locked');
+  }
+
+  unlockCamera(): void {
+    if (!this.cameraLocked && !this.freeCameraActive) return;
+    this.cameraLocked = false;
+    this.freeCameraActive = false;
+    this.keys.delete('q');
+    this.keys.delete('e');
+    this.updateCamera(0, true);
+    this.updateShadowFrustum();
+    this.sceneNeedsRender = true;
+    this.callbacks.onCameraModeChange?.('chase');
+  }
+
   setMultiplayer(client: MultiplayerClient): void {
     this.multiplayer = client;
   }
@@ -598,6 +764,7 @@ export class DriveEngine {
     this.drivingEnabled = enabled;
     this.sceneNeedsRender = true;
     if (!enabled) {
+      this.bankDriftCombo();
       this.keys.clear();
       this.touchKeys.clear();
       this.endCameraDrag();
@@ -606,11 +773,15 @@ export class DriveEngine {
       this.driftValue = 0;
       setVehicleLights(this.visual, false, false);
       this.incomeClock.reset();
-      this.callbacks.onTelemetry({ speedKmh: 0, gear: this.gear, rpm: 850, drifting: false, tcsActive: false });
+      this.callbacks.onTelemetry({ speedKmh: 0, gear: this.gear, rpm: 850, drifting: false, tcsActive: false, driftCombo: this.syncDriftComboState() });
     }
   }
 
   setVehicle(vehicle: VehicleSpec): void {
+    if (this.vehicle.id === vehicle.id && (this.visual.modelLoaded || this.visual.modelInstance)) {
+      this.resetCar();
+      return;
+    }
     this.vehicle = vehicle;
     this.aeroProfile = aeroProfileOf(vehicle);
     this.velocity.set(0, 0, 0);
@@ -620,6 +791,7 @@ export class DriveEngine {
     this.skidModelPositionsReady = false;
     this.incomeClock.reset();
     this.clearSkids();
+    this.placeBrakeSpill();
     this.carRoot.remove(this.visual.root);
     disposeVehicleVisual(this.visual);
     this.visual = createVehicleVisual(vehicle);
@@ -627,9 +799,12 @@ export class DriveEngine {
     this.carRoot.add(this.visual.root);
     this.resetCar();
     this.applyStanceVisuals();
-    void installGeneratedModel(this.visual, vehicle).finally(() => {
-      this.brakeSpillLamps = null;
+    const targetVisual = this.visual;
+    void installGeneratedModel(targetVisual, vehicle).finally(() => {
+      if (this.visual !== targetVisual) return;
       this.applyStanceVisuals();
+      this.uploadTexturesIn(targetVisual.root);
+      void this.precompileSubtree(this.carRoot);
     });
   }
 
@@ -698,26 +873,62 @@ export class DriveEngine {
   // Car on the spawn and every shader of the scene compiled, then one frame drawn.
   private async finishWorldLoad(): Promise<void> {
     this.resetCar();
-    // Compile hidden parts too (lit lamps, brake glow), so the first brake does not hitch.
+    // Upload every texture first with capped anisotropy so nothing uploads mid-corner.
+    this.uploadTexturesIn(this.scene);
     setVehicleLights(this.visual, true, true);
-    await this.renderer.compileAsync(this.scene, this.camera);
+    // Bypass frustum culling during compileAsync so meshes behind/beside the spawn camera
+    // also get their shaders compiled now instead of stalling on the first lap.
+    await this.precompileSubtree(this.scene);
+    this.lampBloom.compile();
     this.lampBloom.render(this.scene, this.camera, this.carRoot);
     setVehicleLights(this.visual, false, false);
-    // Upload every texture now; otherwise each one uploads the first time it
-    // comes into view, and the drive stutters as new parts of the map appear.
+    this.motionBlur.compile();
+    this.lensDrops.compile();
+    this.renderScene();
+  }
+
+  private uploadTexturesIn(root: THREE.Object3D): void {
+    const maxAniso = Math.min(
+      this.renderer.capabilities.getMaxAnisotropy(),
+      this.settings.quality === 'ultra' ? 8 : this.settings.quality === 'high' ? 4 : 2,
+    );
     const textures = new Set<THREE.Texture>();
-    this.scene.traverse((object) => {
+    root.traverse((object) => {
       const material = (object as THREE.Mesh).material;
       if (!material) return;
       for (const entry of Array.isArray(material) ? material : [material]) {
-        for (const value of Object.values(entry)) if ((value as THREE.Texture | null)?.isTexture) textures.add(value as THREE.Texture);
+        for (const value of Object.values(entry)) {
+          if ((value as THREE.Texture | null)?.isTexture) textures.add(value as THREE.Texture);
+        }
       }
     });
-    for (const texture of textures) this.renderer.initTexture(texture);
-    this.motionBlur.compile();
-    this.lampBloom.compile();
-    this.lensDrops.compile();
-    this.renderScene();
+    for (const texture of textures) {
+      if (texture.anisotropy > maxAniso) texture.anisotropy = maxAniso;
+      this.renderer.initTexture(texture);
+    }
+  }
+
+  private async precompileSubtree(targetRoot: THREE.Object3D): Promise<void> {
+    const culled: THREE.Object3D[] = [];
+    targetRoot.traverse((object) => {
+      if ((object as THREE.Mesh).isMesh && object.frustumCulled) {
+        object.frustumCulled = false;
+        culled.push(object);
+      }
+    });
+    const prevHeadlight = this.headlight.visible;
+    try {
+      if (this.settings.quality !== 'low') {
+        this.headlight.visible = true;
+        await this.renderer.compileAsync(this.scene, this.camera);
+      }
+      this.headlight.visible = false;
+      await this.renderer.compileAsync(this.scene, this.camera);
+    } finally {
+      this.headlight.visible = prevHeadlight;
+      for (const object of culled) object.frustumCulled = true;
+      this.sceneNeedsRender = true;
+    }
   }
 
   setSettings(settings: GameSettings): void {
@@ -725,6 +936,12 @@ export class DriveEngine {
     this.sim.automatic = settings.transmissionMode === 'automatic';
     this.sceneNeedsRender = true;
     this.renderer.shadowMap.enabled = settings.shadows && settings.quality !== 'low';
+    const nextShadowType = settings.quality === 'medium' ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+    if (this.renderer.shadowMap.type !== nextShadowType) {
+      this.renderer.shadowMap.type = nextShadowType;
+      this.sun.shadow.map?.dispose();
+      this.sun.shadow.map = null;
+    }
     this.renderer.setPixelRatio(renderPixelRatio(settings.quality, settings.resolutionScale));
     this.renderer.shadowMap.needsUpdate = true;
     const shadowResolution = Math.min(shadowMapResolution(settings.quality), this.renderer.capabilities.maxTextureSize);
@@ -735,7 +952,10 @@ export class DriveEngine {
     }
     this.applyShadowExtent();
     this.skidMarks.visible = settings.effects;
-    for (const light of this.brakeSpill) light.visible = settings.quality !== 'low';
+    if (settings.quality === 'low') {
+      this.headlight.visible = false;
+      this.brakeSpillMesh.visible = false;
+    }
     this.tireSmoke.mesh.visible = settings.effects;
     if (!settings.effects) this.tireSmoke.clear();
     if (!settings.effects) this.clearSkids();
@@ -817,6 +1037,7 @@ export class DriveEngine {
   }
 
   resetCar(): void {
+    this.bankDriftCombo();
     this.sceneNeedsRender = true;
     this.carRoot.position.copy(this.worldData.spawn);
     this.yaw = this.worldData.spawnYaw;
@@ -843,6 +1064,7 @@ export class DriveEngine {
     this.bodyAccelLong = 0;
     this.bodyAccelLat = 0;
     // Back to the default chase framing, snapped so the first frame is already there.
+    if (this.freeCameraActive || this.cameraLocked) this.unlockCamera();
     this.cameraOrbit = 0;
     this.cameraElevation = CAMERA_ELEVATION;
     this.cameraZoom = 1;
@@ -872,10 +1094,17 @@ export class DriveEngine {
     this.shadowRight.crossVectors(this.sunForward, THREE.Object3D.DEFAULT_UP).normalize();
     this.shadowUp.crossVectors(this.shadowRight, this.sunForward).normalize();
     const texel = (this.sun.shadow.camera.right * 2) / this.sun.shadow.mapSize.width;
-    const car = this.carRoot.position;
-    const right = car.dot(this.shadowRight);
-    const up = car.dot(this.shadowUp);
-    this.sun.target.position.set(car.x, car.y, car.z)
+    const focus = this.shadowFocus;
+    if (this.freeCameraActive) {
+      this.camera.getWorldDirection(this.freeCamDir);
+      focus.copy(this.camera.position).addScaledVector(this.freeCamDir, 24);
+      focus.y = groundHeightAt(this.worldData, focus.x, focus.z);
+    } else {
+      focus.copy(this.carRoot.position);
+    }
+    const right = focus.dot(this.shadowRight);
+    const up = focus.dot(this.shadowUp);
+    this.sun.target.position.set(focus.x, focus.y, focus.z)
       .addScaledVector(this.shadowRight, Math.round(right / texel) * texel - right)
       .addScaledVector(this.shadowUp, Math.round(up / texel) * texel - up);
     this.sun.position.copy(this.sun.target.position).add(this.sunOffset);
@@ -900,13 +1129,19 @@ export class DriveEngine {
       fog.far = this.fogBase.far * lighting.fogFar;
     }
     (this.scene.background as THREE.Color | null)?.copy(this.atmosphere.fogColor);
-    this.headlight.intensity = HEADLIGHT_INTENSITY * lighting.darkness;
+    const headlightActive = this.settings.quality !== 'low' && lighting.darkness > 0.01;
+    this.headlight.visible = headlightActive;
+    this.headlight.intensity = headlightActive ? HEADLIGHT_INTENSITY * lighting.darkness : 0;
     this.headlight.position.set(0, this.vehicle.height * 0.42, this.vehicle.length * 0.47);
     this.headlight.target.position.set(0, 0, this.vehicle.length * 0.47 + 28);
-    this.brakeSpillScale = 0.08 + 0.92 * lighting.darkness;
+    this.brakeSpillScale = 0.14 + 0.86 * lighting.darkness;
     const state = this.environment.state;
     this.environment.rain.update(this.camera, this.environmentTime, state.rain, 1 - lighting.darkness * 0.75);
     this.environment.bolt.update(this.camera, lighting.flash);
+    if (lighting.struck) {
+      const stormShare = THREE.MathUtils.smoothstep(state.rain, 0.55, 1.0);
+      this.vehicleAudio.playThunder(0.45 + 0.55 * stormShare);
+    }
     const dropsOn = this.drivingEnabled && this.settings.effects && state.lensDrops;
     if (dropsOn || this.lensDrops.active) {
       this.lensDrops.update(dt, dropsOn ? state.rain : 0, this.velocity.length(), 1 - lighting.darkness * 0.7, this.dropFocus);
@@ -915,10 +1150,12 @@ export class DriveEngine {
       applyWetness(this.worldData.root, lighting.wetness);
       this.wetnessApplied = lighting.wetness;
     }
-    // Re-bake the sky's reflections now and then as the light changes.
+    // Re-bake the sky's reflections only on explicit weather/time edits or large sky shifts.
     const hourChange = Math.abs(THREE.MathUtils.euclideanModulo(state.timeOfDay - this.bakedHour + 12, 24) - 12);
-    if (this.bakeForced || (this.environmentTime - this.bakedAt > ENVIRONMENT_BAKE_INTERVAL
-      && (hourChange > 0.12 || Math.abs(state.rain - this.bakedRain) > 0.04))) {
+    const autoBakeAllowed = this.settings.quality === 'high' || this.settings.quality === 'ultra';
+    if (this.bakeForced || (autoBakeAllowed
+      && this.environmentTime - this.bakedAt > ENVIRONMENT_BAKE_INTERVAL
+      && (hourChange > 0.65 || Math.abs(state.rain - this.bakedRain) > 0.12))) {
       this.bakeForced = false;
       this.scene.environment = this.atmosphere.bake(this.renderer);
       this.environmentBakes += 1;
@@ -976,8 +1213,8 @@ export class DriveEngine {
     const color = this.atmosphere.fogColor;
     this.scene.background = color.clone();
     const fog = this.settings.quality === 'low'
-      ? new THREE.Fog(color, 80, 520)
-      : new THREE.Fog(color, 108, this.settings.quality === 'ultra' ? 1200 : this.settings.quality === 'high' ? 950 : 700);
+      ? new THREE.Fog(color, 80, 460)
+      : new THREE.Fog(color, 108, this.settings.quality === 'ultra' ? 1050 : this.settings.quality === 'high' ? 820 : 620);
     this.scene.fog = fog;
     this.fogBase = { near: fog.near, far: fog.far };
     // Past fog.far everything is exactly the background colour, so do not draw it.
@@ -997,9 +1234,44 @@ export class DriveEngine {
 
   private frame = (time: number): void => {
     const rawDt = this.clock.getDelta();
-    const dt = Math.min(rawDt, 0.05);
-    if (rawDt > 0) this.fps += (1 / rawDt - this.fps) * 0.08;
     if (this.active) {
+      this.renderElapsed += rawDt;
+      const limit = this.settings.fpsLimit === 0 ? 0 : 1 / this.settings.fpsLimit;
+      // VSync jitter tolerance (1.6 ms) prevents 60 Hz / 120 Hz ProMotion displays from
+      // dropping every 2nd or 3rd refresh when fpsLimit === 60, and steps simulation in
+      // 1:1 lockstep with rendered frames so physics never advances on skipped frames.
+      if (!this.sceneNeedsRender && limit > 0 && this.renderElapsed + 0.0016 < limit) {
+        this.animationFrame = requestAnimationFrame(this.frame);
+        return;
+      }
+      const frameDt = this.renderElapsed;
+      this.renderElapsed = limit > 0 ? Math.max(0, Math.min(this.renderElapsed - limit, limit * 0.5)) : 0;
+      const dt = Math.min(frameDt, 0.05);
+      if (frameDt > 0) this.fps += (1 / frameDt - this.fps) * 0.08;
+
+      if (!this.drivingEnabled && !this.sceneNeedsRender && this.remoteVehicles.size === 0) {
+        const idleRain = this.environment.state.rain;
+        if (idleRain > 0.005 || this.environment.state.lightning) {
+          const lighting = this.environment.update(dt);
+          if (lighting.struck) {
+            const stormShare = THREE.MathUtils.smoothstep(idleRain, 0.55, 1.0);
+            this.vehicleAudio.playThunder(0.45 + 0.55 * stormShare, true);
+          }
+        }
+        this.vehicleAudio.update({
+          dt,
+          speedKmh: 0,
+          rpm: 850,
+          gear: this.gear,
+          throttle: 0,
+          drift: 0,
+          rain: idleRain,
+          active: false,
+        });
+        this.animationFrame = requestAnimationFrame(this.frame);
+        return;
+      }
+
       this.renderer.info.reset();
       this.updateEnvironment(dt);
       if (this.drivingEnabled) this.updateDriving(dt);
@@ -1015,8 +1287,9 @@ export class DriveEngine {
         speedKmh: telemetry.speedKmh,
         rpm: telemetry.rpm,
         gear: this.gear,
-        throttle: this.isDown('w') ? 1 : 0,
+        throttle: !this.freeCameraActive && this.isDown('w') ? 1 : 0,
         drift: this.driftValue,
+        rain: this.environment.state.rain,
         active: this.drivingEnabled,
       });
       if (this.drivingEnabled && this.multiplayer?.isInRoom) {
@@ -1042,16 +1315,14 @@ export class DriveEngine {
       const income = this.incomeClock.update(dt, this.forwardSpeedKmh(), this.vehicle, this.drivingEnabled);
       if (income.paid > 0) this.callbacks.onIncome(income.paid);
       this.telemetryElapsed += dt;
-      if (this.drivingEnabled && this.telemetryElapsed >= 0.08) {
+      const telemetryInterval = this.driftScore > 0 ? 0.045 : 0.08;
+      if (this.drivingEnabled && this.telemetryElapsed >= telemetryInterval) {
         this.telemetryElapsed = 0;
         this.callbacks.onTelemetry(telemetry);
       }
-      this.renderElapsed += dt;
-      const limit = this.settings.fpsLimit === 0 ? 0 : 1 / this.settings.fpsLimit;
-      if (this.sceneNeedsRender || (this.drivingEnabled && (limit === 0 || this.renderElapsed >= limit))) {
+      if (this.sceneNeedsRender || this.drivingEnabled) {
         this.renderScene();
         this.sceneNeedsRender = false;
-        this.renderElapsed = 0;
       }
     }
     this.animationFrame = requestAnimationFrame(this.frame);
@@ -1061,12 +1332,15 @@ export class DriveEngine {
   private updateDriving(dt: number): void {
     this.previousCarPosition.copy(this.carRoot.position);
     this.drivingElapsed += dt;
-    const out = this.sim.step(dt, {
-      throttle: this.isDown('w') ? 1 : 0,
-      brake: this.isDown('s') ? 1 : 0,
-      steer: (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0),
-      handbrake: this.isDown(' '),
-    }, !this.airborne, this.wheelSuspensionLoads);
+    const drivingControls = this.freeCameraActive
+      ? { throttle: 0, brake: 0, steer: 0, handbrake: false }
+      : {
+          throttle: this.isDown('w') ? 1 : 0,
+          brake: this.isDown('s') ? 1 : 0,
+          steer: (this.isDown('a') ? 1 : 0) - (this.isDown('d') ? 1 : 0),
+          handbrake: this.isDown(' '),
+        };
+    const out = this.sim.step(dt, drivingControls, !this.airborne, this.wheelSuspensionLoads);
     const burnout = this.sim.burnout;
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
@@ -1078,6 +1352,7 @@ export class DriveEngine {
     const driftSeverity = out.rearSlide;
     const drifting = speed > 6 && Math.abs(lateral) > 1 && driftSeverity > 0.05;
     this.driftValue = drifting ? Math.min(1, this.driftValue + dt * (1.5 + driftSeverity * 2)) : Math.max(0, this.driftValue - dt * 3.4);
+    this.updateDriftScore(dt, longitudinal, lateral, speed, slipAngle, driftSeverity);
 
     // Physics speeds are real metres per second; the world is built WORLD_SCALE times larger.
     this.carRoot.position.addScaledVector(this.velocity, dt * WORLD_SCALE);
@@ -1101,20 +1376,25 @@ export class DriveEngine {
     // The wheels show the real steering angle, counter-steer included.
     setVehicleWheelSpin(this.visual, this.wheelTravel, this.frontWheelAngle, this.rearWheelTravel, this.stance);
     setVehicleSuspension(this.visual, this.suspensionTravel, this.stance);
-    setVehicleLights(this.visual, this.isDown('s'), this.gear === -1, dt);
-    const spill = BRAKE_SPILL_INTENSITY * this.brakeSpillScale * this.visual.lights.brakeLevel;
-    if (spill > 0 && this.brakeSpillLamps !== this.visual.lights) this.placeBrakeSpill();
-    for (const light of this.brakeSpill) light.intensity = spill;
+    setVehicleLights(this.visual, !this.freeCameraActive && this.isDown('s'), this.gear === -1, dt);
+    const spill = this.settings.quality !== 'low' && this.settings.effects
+      ? BRAKE_SPILL_OPACITY * this.brakeSpillScale * this.visual.lights.brakeLevel
+      : 0;
+    const spillVisible = spill > 0.006;
+    this.brakeSpillMesh.visible = spillVisible;
+    if (spillVisible) {
+      this.brakeSpillMaterial.opacity = spill;
+      // Keep the road glow flush on the ground beneath body pitch/heave.
+      this.brakeSpillMesh.position.y = Math.max(0.02, this.wheelGround[2] - this.bodyHeight + 0.025);
+    }
   }
 
-  /** Puts each spill light right at its detected brake lamp center. */
+  /** Sizes and places the additive red road-glow quad right behind the rear bumper. */
   private placeBrakeSpill(): void {
-    this.brakeSpillLamps = this.visual.lights;
-    const lamps = brakeLampCenters(this.visual, this.carRoot);
-    this.brakeSpill.forEach((light, i) => {
-      if (lamps) light.position.copy(lamps[i]);
-      else light.position.set((i === 0 ? 1 : -1) * this.vehicle.width * 0.36, this.vehicle.height * 0.62, -this.vehicle.length * 0.5 - BRAKE_SPILL_BEHIND);
-    });
+    const w = this.vehicle.width * 1.48;
+    const d = Math.max(1.9, this.vehicle.length * 0.44);
+    this.brakeSpillMesh.scale.set(w, d, 1);
+    this.brakeSpillMesh.position.set(0, 0.025, -this.vehicle.length * 0.5 - d * 0.28);
   }
 
   /**
@@ -1656,7 +1936,7 @@ export class DriveEngine {
   private renderScene(): void {
     let strength = 0;
     const speed = this.velocity.length();
-    if (this.drivingEnabled && this.settings.effects && this.settings.quality !== 'low' && speed > MOTION_BLUR_START) {
+    if (!this.freeCameraActive && this.drivingEnabled && this.settings.effects && this.settings.quality !== 'low' && speed > MOTION_BLUR_START) {
       // Streak away from where the car is heading, as seen on screen.
       this.blurProbe.copy(this.carRoot.position).addScaledVector(this.velocity, 200 / speed).project(this.camera);
       if (this.blurProbe.z < 1) {
@@ -1677,6 +1957,20 @@ export class DriveEngine {
   }
 
   private updateCamera(dt: number, snap = false): void {
+    if (this.freeCameraActive) {
+      this.updateFreeCamera(dt);
+      return;
+    }
+    if (this.cameraLocked) {
+      const basis = this.computeLockedBasis(this.lockedDistance);
+      this.camera.position.copy(this.lockedLocalPos).applyQuaternion(basis).add(this.carRoot.position);
+      if (this.lockedDistance > 3.2) {
+        const minGroundY = groundHeightAt(this.worldData, this.camera.position.x, this.camera.position.z) + 0.20;
+        if (this.camera.position.y < minGroundY) this.camera.position.y = minGroundY;
+      }
+      this.camera.quaternion.copy(basis).multiply(this.lockedLocalQuat);
+      return;
+    }
     const sizeScale = this.vehicle.length / CAMERA_REFERENCE_LENGTH;
     const targetHeight = CAMERA_TARGET_HEIGHT * this.vehicle.height / CAMERA_REFERENCE_HEIGHT;
     const speed = this.velocity.length();
@@ -1752,9 +2046,144 @@ export class DriveEngine {
     this.camera.rotateZ(-motion.roll + motion.shake.roll);
   }
 
+  private updateFreeCamera(dt: number): void {
+    const lookYawInput = Number(this.keys.has('arrowleft')) - Number(this.keys.has('arrowright'));
+    const lookPitchInput = Number(this.keys.has('arrowup')) - Number(this.keys.has('arrowdown'));
+    this.freeCamYaw = Math.atan2(
+      Math.sin(this.freeCamYaw + lookYawInput * dt * 1.8),
+      Math.cos(this.freeCamYaw + lookYawInput * dt * 1.8),
+    );
+    this.freeCamPitch = THREE.MathUtils.clamp(this.freeCamPitch + lookPitchInput * dt * 1.35, -1.52, 1.52);
+
+    const cosPitch = Math.cos(this.freeCamPitch);
+    this.freeCamDir.set(-Math.sin(this.freeCamYaw) * cosPitch, Math.sin(this.freeCamPitch), -Math.cos(this.freeCamYaw) * cosPitch);
+    this.freeCamRight.set(Math.cos(this.freeCamYaw), 0, -Math.sin(this.freeCamYaw));
+
+    const forwardInput = Number(this.keys.has('w')) - Number(this.keys.has('s'));
+    const rightInput = Number(this.keys.has('d')) - Number(this.keys.has('a'));
+    const upInput = Number(this.keys.has(' ') || this.keys.has('e')) - Number(this.keys.has('q') || this.keys.has('control'));
+
+    this.freeCamMove.set(0, 0, 0)
+      .addScaledVector(this.freeCamDir, forwardInput)
+      .addScaledVector(this.freeCamRight, rightInput);
+    this.freeCamMove.y += upInput;
+    if (this.freeCamMove.lengthSq() > 1) this.freeCamMove.normalize();
+
+    const boost = this.keys.has('shift') ? 3.5 : 1;
+    this.freeCamMove.multiplyScalar(this.freeCamSpeed * boost);
+
+    const blend = 1 - Math.exp(-dt * 12);
+    this.freeCamVel.lerp(this.freeCamMove, blend);
+    this.freeCamPos.addScaledVector(this.freeCamVel, dt);
+
+    // Keep at least 22 cm above the ground surface so low stance shots never clip beneath the map.
+    const minGroundY = groundHeightAt(this.worldData, this.freeCamPos.x, this.freeCamPos.z) + 0.22;
+    if (this.freeCamPos.y < minGroundY) {
+      this.freeCamPos.y = minGroundY;
+      if (this.freeCamVel.y < 0) this.freeCamVel.y = 0;
+    }
+
+    this.camera.position.copy(this.freeCamPos);
+    this.camera.rotation.set(this.freeCamPitch, this.freeCamYaw, 0, 'YXZ');
+  }
+
   private forwardSpeedKmh(): number {
     this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     return Math.max(0, this.velocity.dot(this.forward) * ECONOMY.kmhPerUnit);
+  }
+
+  private updateDriftScore(
+    dt: number,
+    longitudinal: number,
+    lateral: number,
+    speed: number,
+    slipAngle: number,
+    driftSeverity: number,
+  ): void {
+    if (this.driftTransitionTimer > 0) {
+      this.driftTransitionTimer = Math.max(0, this.driftTransitionTimer - dt);
+    }
+    const angleDeg = slipAngle * (180 / Math.PI);
+    const scoringDrift = !this.freeCameraActive
+      && !this.airborne
+      && longitudinal > 2.2
+      && speed > 5.8
+      && Math.abs(lateral) > 0.95
+      && (angleDeg > 8.5 || driftSeverity > 0.05);
+
+    if (scoringDrift) {
+      this.driftSlidingNow = true;
+      this.driftIdleTimer = 0;
+      this.driftCurrentAngleDeg = angleDeg;
+
+      const currentSide: -1 | 1 = lateral >= 0 ? 1 : -1;
+      if (this.driftSide === currentSide) {
+        this.driftSideHold += dt;
+      } else {
+        // Switching drift direction after holding the previous slide rewards a transition boost.
+        if (this.driftSide !== 0 && this.driftSideHold >= 0.4 && this.driftScore > 40) {
+          this.driftComboProgress += 0.95;
+          this.driftTransitionTimer = 0.85;
+        }
+        this.driftSide = currentSide;
+        this.driftSideHold = dt;
+      }
+
+      const speedKmh = speed * ECONOMY.kmhPerUnit;
+      const angleFactor = THREE.MathUtils.smoothstep(angleDeg, 8, 48);
+      const speedFactor = 0.45 + 1.55 * THREE.MathUtils.smoothstep(speedKmh, 24, 175);
+      this.driftComboProgress += dt * (0.85 + 0.55 * angleFactor);
+      const step = Math.floor(this.driftComboProgress / DRIFT_SECONDS_PER_STEP);
+      this.driftMultiplier = Math.min(DRIFT_MAX_MULTIPLIER, 1 + step * 0.5);
+      if (this.driftMultiplier > this.driftPeakMultiplier) {
+        this.driftPeakMultiplier = this.driftMultiplier;
+      }
+
+      const baseRate = 430 * (0.28 + 0.72 * angleFactor) * speedFactor;
+      this.driftScore += baseRate * this.driftMultiplier * dt;
+      return;
+    }
+
+    this.driftSlidingNow = false;
+    if (this.driftScore <= 0) return;
+
+    this.driftIdleTimer += dt;
+    if (this.driftIdleTimer >= DRIFT_COMBO_TIMEOUT) {
+      this.bankDriftCombo();
+    }
+  }
+
+  private bankDriftCombo(): void {
+    const finalScore = Math.round(this.driftScore);
+    const peakMult = this.driftPeakMultiplier;
+    this.driftScore = 0;
+    this.driftMultiplier = 1;
+    this.driftPeakMultiplier = 1;
+    this.driftComboProgress = 0;
+    this.driftIdleTimer = 0;
+    this.driftSide = 0;
+    this.driftSideHold = 0;
+    this.driftTransitionTimer = 0;
+    this.driftCurrentAngleDeg = 0;
+    this.driftSlidingNow = false;
+
+    if (finalScore >= 25) {
+      const payout = Math.max(1, Math.round(finalScore * DRIFT_PAYOUT_SHARE));
+      this.callbacks.onDriftComplete?.(finalScore, payout, peakMult);
+      this.callbacks.onTelemetry(this.makeTelemetry());
+    }
+  }
+
+  private syncDriftComboState(): DriftComboState {
+    const c = this.driftComboState;
+    c.active = this.driftScore >= 10;
+    c.sliding = this.driftSlidingNow;
+    c.score = Math.round(this.driftScore);
+    c.multiplier = this.driftMultiplier;
+    c.remainingSeconds = c.active ? Math.max(0, DRIFT_COMBO_TIMEOUT - this.driftIdleTimer) : 0;
+    c.angleDeg = Math.round(this.driftCurrentAngleDeg);
+    c.transitionFlash = this.driftTransitionTimer > 0;
+    return c;
   }
 
   private makeTelemetry(): Telemetry {
@@ -1765,6 +2194,7 @@ export class DriveEngine {
     t.rpm = Math.round(this.sim.drivetrain.rpm);
     t.drifting = this.driftValue > 0.2;
     t.tcsActive = this.sim.output.tcsActive;
+    t.driftCombo = this.syncDriftComboState();
     return t;
   }
 
@@ -1781,6 +2211,7 @@ export class DriveEngine {
     window.removeEventListener('pointerup', this.onCameraPointerEnd, true);
     window.removeEventListener('pointercancel', this.onCameraPointerEnd, true);
     this.renderer.domElement.removeEventListener('wheel', this.onCameraWheel);
+    this.renderer.domElement.removeEventListener('contextmenu', this.onContextMenu);
     this.host.removeChild(this.renderer.domElement);
     this.motionBlur.dispose();
     this.atmosphere.dispose();
@@ -1816,4 +2247,29 @@ function disposeObject(object: THREE.Object3D): void {
       for (const material of materials) material.dispose();
     }
   });
+}
+
+let cachedBrakeSpillTexture: THREE.CanvasTexture | null = null;
+
+function createBrakeSpillTexture(): THREE.CanvasTexture {
+  if (cachedBrakeSpillTexture) return cachedBrakeSpillTexture;
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+  // Dual soft radial lobes matching the left and right tail lamps on the road behind the bumper.
+  for (const cx of [size * 0.29, size * 0.71]) {
+    const cy = size * 0.36;
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size * 0.38);
+    grad.addColorStop(0, 'rgba(255, 18, 8, 0.95)');
+    grad.addColorStop(0.45, 'rgba(220, 10, 4, 0.42)');
+    grad.addColorStop(1, 'rgba(180, 0, 0, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  cachedBrakeSpillTexture = texture;
+  return texture;
 }

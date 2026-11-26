@@ -26,7 +26,7 @@ export const DAYLIGHT: SkyColors = {
   sun: new THREE.Color('#fff2da'),
 };
 
-const ENVIRONMENT_SIZE = 256;
+const ENVIRONMENT_SIZE = 64;
 
 const skyVertex = /* glsl */ `
   varying vec3 vDirection;
@@ -113,7 +113,7 @@ export class Atmosphere {
     this.dome.frustumCulled = false;
     this.dome.renderOrder = -1;
     this.dome.userData.castsShadow = false;
-    this.bakeSky = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 32), skyMaterial());
+    this.bakeSky = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), skyMaterial());
     this.bakeScene.add(this.bakeSky);
     this.setSky(colors, lightDirection, 40, 1);
   }

@@ -10,16 +10,11 @@ import * as THREE from 'three';
 
 export const GLOW_LAYER = 3;
 
-const DOWNSCALE = 4;
-// Light scattering in a lens or the eye: a bright, tight core with a tail that
-// fades out smoothly and reaches far. Each level blurs further (a few small
-// passes, so wide blurs stay smooth without banding) and is summed with a
-// falling weight; one single blur reads as a flat, artificial blob instead.
+const DOWNSCALE = 5;
+// Two-level separable bloom: tight bright core + wide soft halo in 3 H/V passes instead of 9.
 const BLOOM_LEVELS = [
-  { passes: 1, radius: 1.0, weight: 0.52 },
-  { passes: 2, radius: 1.3, weight: 0.26 },
-  { passes: 3, radius: 1.6, weight: 0.14 },
-  { passes: 3, radius: 1.8, weight: 0.08 },
+  { passes: 1, radius: 1.2, weight: 0.66 },
+  { passes: 2, radius: 2.1, weight: 0.34 },
 ];
 // Glow added on top of the frame.
 const GLOW_STRENGTH = 1.7;
@@ -73,12 +68,14 @@ export class LampBloom {
   private readonly blur: THREE.ShaderMaterial;
   private readonly accumulate: THREE.ShaderMaterial;
   private readonly composite: THREE.ShaderMaterial;
+  private readonly depthMaterial = new THREE.MeshBasicMaterial({ fog: false, side: THREE.DoubleSide });
   private readonly quad: THREE.Mesh;
   private readonly quadScene = new THREE.Scene();
   private readonly quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private readonly size = new THREE.Vector2();
   private readonly clearColor = new THREE.Color();
   private readonly hidden: THREE.Object3D[] = [];
+  private readonly hiddenMeshes: THREE.Mesh[] = [];
 
   constructor(private readonly renderer: THREE.WebGLRenderer) {
     const options = { type: THREE.HalfFloatType, depthBuffer: true } as const;
@@ -133,7 +130,7 @@ export class LampBloom {
     const [a, b] = this.targets;
     const mask = camera.layers.mask;
     const background = scene.background;
-    const fog = scene.fog;
+    const prevOverride = scene.overrideMaterial;
     const clearAlpha = renderer.getClearAlpha();
     const autoClear = renderer.autoClear;
     renderer.getClearColor(this.clearColor);
@@ -141,26 +138,38 @@ export class LampBloom {
     const shadowAutoUpdate = renderer.shadowMap.autoUpdate;
     renderer.shadowMap.autoUpdate = false;
     scene.background = null;
-    scene.fog = null;
     renderer.setClearColor(0x000000, 0);
     renderer.setRenderTarget(a);
     renderer.clear();
     renderer.autoClear = false;
     if (occluder) {
-      // Depth of the occluder only. Lights stay on, so no material needs a
-      // new shader; transparent lenses write no depth and do not hide lamps.
+      // Depth of opaque bodywork only using a lightweight override material (leaving scene.fog
+      // untouched so car PBR materials never have to recompile a second fog-free shader variant).
       for (const child of scene.children) {
         if (child !== occluder && child.visible && !(child as THREE.Light).isLight) {
           child.visible = false;
           this.hidden.push(child);
         }
       }
+      occluder.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.visible) return;
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        if (mats.some((m) => m.transparent)) {
+          mesh.visible = false;
+          this.hiddenMeshes.push(mesh);
+        }
+      });
+      scene.overrideMaterial = this.depthMaterial;
       const color = renderer.state.buffers.color;
       color.setMask(false);
       color.setLocked(true);
       renderer.render(scene, camera);
       color.setLocked(false);
       color.setMask(true);
+      scene.overrideMaterial = prevOverride;
+      for (const mesh of this.hiddenMeshes) mesh.visible = true;
+      this.hiddenMeshes.length = 0;
       for (const child of this.hidden) child.visible = true;
       this.hidden.length = 0;
     }
@@ -169,7 +178,6 @@ export class LampBloom {
     renderer.autoClear = autoClear;
     camera.layers.mask = mask;
     scene.background = background;
-    scene.fog = fog;
     renderer.shadowMap.autoUpdate = shadowAutoUpdate;
     renderer.setClearColor(this.clearColor, clearAlpha);
 
@@ -220,6 +228,7 @@ export class LampBloom {
     this.blur.dispose();
     this.accumulate.dispose();
     this.composite.dispose();
+    this.depthMaterial.dispose();
     this.quad.geometry.dispose();
   }
 }

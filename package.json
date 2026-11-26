@@ -7,6 +7,8 @@
     "dev": "node server/dev.js",
     "build": "tsc -b && vite build",
     "test": "node scripts/test.mjs",
+    "check-models": "node scripts/optimize-models.mjs --check",
+    "optimize-models": "node scripts/optimize-models.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "start": "node server/index.js",
     "server": "node server/index.js"

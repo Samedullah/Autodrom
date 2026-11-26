@@ -5,16 +5,39 @@ export interface VehicleAudioState {
   gear: number;
   throttle: number;
   drift: number;
+  rain: number;
   active: boolean;
 }
 
 type SoundLayer = 'idle' | 'load' | 'skid';
+type WeatherClip = 'rain' | 'thunder';
 
 const AUDIO_FILES: Record<SoundLayer, string> = {
   idle: '/assets/audio/cars/default/engine-idle.ogg',
   load: '/assets/audio/cars/default/engine-load.ogg',
   skid: '/assets/audio/cars/default/tire-skid.ogg',
 };
+
+// Candidate locations checked in order so yagmur.ogg / simsek.ogg work whether placed
+// in public/assets/audio/, public/assets/audio/weather/, public/assets/audio/cars/default/, or public/.
+const WEATHER_CANDIDATES: Record<WeatherClip, readonly string[]> = {
+  rain: [
+    '/assets/audio/yagmur.ogg',
+    '/assets/audio/weather/yagmur.ogg',
+    '/assets/audio/cars/default/yagmur.ogg',
+    '/yagmur.ogg',
+  ],
+  thunder: [
+    '/assets/audio/simsek.ogg',
+    '/assets/audio/weather/simsek.ogg',
+    '/assets/audio/cars/default/simsek.ogg',
+    '/simsek.ogg',
+  ],
+};
+
+const RAIN_MAX_VOLUME = 0.88;
+const THUNDER_VOLUME = 0.85;
+const WEATHER_RETRY_SECONDS = 6;
 
 const IDLE_RPM = 851;
 const REDLINE_RPM = 7050;
@@ -26,13 +49,98 @@ const LIMITER_HZ = 18;
 const POP_VOLUME = 0.55;
 const POP_MIN_RPM = 3000;
 
+const SCRUBBER_WORKLET_NAME = 'autodrom-load-scrubber';
+const SCRUBBER_WORKLET_CODE = `
+class AutodromLoadScrubber extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.channels = null;
+    this.length = 0;
+    this.step = 1;
+    this.windowSamples = 2048;
+    this.fadeSamples = 1024;
+    this.targetOffset = 0;
+    this.limiter = false;
+    this.current = 0;
+    this.previous = 0;
+    this.fade = 1;
+    this.counter = 0;
+    this.limiterPhase = 0;
+    this.port.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'init') {
+        this.channels = msg.channels;
+        this.length = msg.channels[0] ? msg.channels[0].length : 0;
+        this.step = msg.step;
+        this.windowSamples = msg.windowSamples;
+        this.fadeSamples = msg.fadeSamples;
+        this.targetOffset = msg.targetOffset;
+        this.current = msg.targetOffset;
+      } else if (msg.type === 'state') {
+        this.targetOffset = msg.targetOffset;
+        this.limiter = msg.limiter;
+      }
+    };
+  }
+  read(ch, pos) {
+    const idx = Math.min(this.length - 2, Math.max(0, pos));
+    const base = idx | 0;
+    const t = idx - base;
+    return ch[base] * (1 - t) + ch[base + 1] * t;
+  }
+  process(_inputs, outputs) {
+    const out = outputs[0];
+    if (!out || !this.channels || this.length < 4) return true;
+    const nFrames = out[0].length;
+    const nOut = out.length;
+    const nIn = this.channels.length;
+    for (let i = 0; i < nFrames; i++) {
+      if (this.counter >= this.windowSamples - this.fadeSamples || this.current >= this.length - 2) {
+        this.previous = this.current;
+        this.current = Math.min(this.targetOffset, Math.max(0, this.length - 2 - this.windowSamples * this.step));
+        this.fade = 0;
+        this.counter = 0;
+      }
+      let limiterGain = 1;
+      if (this.limiter) {
+        limiterGain = Math.sin(this.limiterPhase * 6.2831853) > 0.15 ? 1 : 0.28;
+        this.limiterPhase += ${LIMITER_HZ} / sampleRate;
+        if (this.limiterPhase >= 1) this.limiterPhase -= 1;
+      }
+      const fadeIn = this.fade < 1 ? Math.sin(this.fade * 1.5707963) : 1;
+      const fadeOut = this.fade < 1 ? Math.cos(this.fade * 1.5707963) : 0;
+      for (let c = 0; c < nOut; c++) {
+        const input = this.channels[c < nIn ? c : nIn - 1];
+        let s = this.read(input, this.current) * fadeIn;
+        if (this.fade < 1) s += this.read(input, this.previous) * fadeOut;
+        out[c][i] = s * limiterGain;
+      }
+      this.current += this.step;
+      if (this.fade < 1) {
+        this.previous += this.step;
+        this.fade = Math.min(1, this.fade + 1 / this.fadeSamples);
+      }
+      this.counter++;
+    }
+    return true;
+  }
+}
+registerProcessor('${SCRUBBER_WORKLET_NAME}', AutodromLoadScrubber);
+`;
+
+const registeredContexts = new WeakSet<AudioContext>();
+
 /** Small Web Audio layer for the player's vehicle. Missing audio files stay silent. */
 export class VehicleAudio {
   private context: AudioContext | null = null;
   private master: GainNode | null = null;
   private readonly gains: Partial<Record<SoundLayer, GainNode>> = {};
   private readonly sources: Partial<Record<SoundLayer, AudioBufferSourceNode>> = {};
-  private loadScrubber: ScriptProcessorNode | null = null;
+  private loadScrubber: AudioNode | null = null;
+  private loadWorkletPort: MessagePort | null = null;
+  private scrubberStarting = false;
+  private lastSentOffset = -1;
+  private lastSentLimiter = false;
   // Where in the recorded sweep the engine's RPM sits (recording samples), and the limiter.
   private readonly loadState = { targetOffset: 0, limiter: false };
   private readonly buffers: Partial<Record<SoundLayer, AudioBuffer>> = {};
@@ -46,6 +154,15 @@ export class VehicleAudio {
   private recentThrottle = 0;   // decaying peak of recent throttle, detects a lift-off
   private overrunTime = -1;      // seconds since the throttle was lifted (-1 = on throttle)
   private nextPopAt = 0;        // context time of the next allowed random crackle
+  // Weather audio: seamless rain loop (yagmur.ogg) and one-shot thunder strikes (simsek.ogg).
+  private readonly weatherBuffers: Partial<Record<WeatherClip, AudioBuffer>> = {};
+  private readonly weatherRaw: Partial<Record<WeatherClip, ArrayBuffer>> = {};
+  private rainGain: GainNode | null = null;
+  private rainFilter: BiquadFilterNode | null = null;
+  private rainSource: AudioBufferSourceNode | null = null;
+  private thunderGain: GainNode | null = null;
+  private weatherLoading = false;
+  private lastWeatherRetryAt = -Infinity;
 
   async unlock(): Promise<void> {
     if (this.disposed || typeof window === 'undefined') return;
@@ -67,10 +184,23 @@ export class VehicleAudio {
         this.popGain.gain.value = POP_VOLUME;
         this.popGain.connect(this.master);
         this.noiseBuffer = this.createNoiseBuffer(this.context);
+
+        this.rainFilter = this.context.createBiquadFilter();
+        this.rainFilter.type = 'lowpass';
+        this.rainFilter.frequency.value = 5000;
+        this.rainGain = this.context.createGain();
+        this.rainGain.gain.value = 0;
+        this.rainFilter.connect(this.rainGain);
+        this.rainGain.connect(this.master);
+
+        this.thunderGain = this.context.createGain();
+        this.thunderGain.gain.value = THUNDER_VOLUME;
+        this.thunderGain.connect(this.master);
       }
       if (this.context.state !== 'running') await this.context.resume();
       this.loading ??= this.loadBuffers();
       await this.loading;
+      await this.decodeWeatherBuffers();
       this.startLoops();
     } catch {
       // Audio is optional; browser policy or a missing device must not affect driving.
@@ -104,6 +234,60 @@ export class VehicleAudio {
     this.updateLoadScrubber(this.rpm, this.rpm >= REDLINE_RPM - 30);
     this.setLayer('skid', skidGain, 0.9 + Math.min(0.3, state.drift * 0.3), now);
     this.updateOverrun(state, throttle, now);
+    this.updateRainAudio(state.rain, speedBlend, state.active, now);
+  }
+
+  /** Plays a one-shot thunder clap (simsek.ogg) with slight natural distance & pitch variation. */
+  playThunder(intensity = 1, immediate = false): void {
+    void this.unlock().then(() => {
+      const context = this.context;
+      const out = this.thunderGain;
+      if (!context || context.state !== 'running' || !out || this.disposed) return;
+      const buffer = this.weatherBuffers.thunder;
+      if (!buffer) {
+        this.retryMissingWeather(context.currentTime, () => this.playThunder(intensity, true));
+        return;
+      }
+      const now = context.currentTime;
+      const delay = immediate ? 0.015 : 0.06 + Math.random() * 0.24;
+      const startAt = now + delay;
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.playbackRate.value = 0.88 + Math.random() * 0.22;
+      const strikeGain = context.createGain();
+      strikeGain.gain.value = Math.min(1.25, Math.max(0.35, intensity)) * (0.85 + Math.random() * 0.25);
+      source.connect(strikeGain).connect(out);
+      source.onended = () => {
+        source.disconnect();
+        strikeGain.disconnect();
+      };
+      source.start(startAt);
+    });
+  }
+
+  private updateRainAudio(rainAmount: number, speedBlend: number, drivingActive: boolean, now: number): void {
+    const rain = Math.min(1, Math.max(0, rainAmount));
+    if (rain > 0.01 && !this.weatherBuffers.rain) {
+      this.retryMissingWeather(now);
+    }
+    if (rain > 0.005 && !this.rainSource && this.weatherBuffers.rain) {
+      this.startRainLoop();
+    }
+    if (!this.rainGain || !this.rainFilter) return;
+    // Audible right from 5-15% drizzle (~0.17 gain, crisp 3.6+ kHz drops) and scaling steadily
+    // up to a loud 0.88 downpour at 100%.
+    const focusShare = drivingActive ? 1 : 0.85;
+    const intensityCurve = 0.16 + 0.84 * Math.pow(rain, 1.05);
+    const targetGain = rain > 0.005
+      ? intensityCurve * RAIN_MAX_VOLUME * (1 + 0.16 * speedBlend) * focusShare
+      : 0;
+    this.rainGain.gain.setTargetAtTime(targetGain, now, 0.12);
+    const cutoffHz = 3600 + rain * 8400 + speedBlend * 1400;
+    this.rainFilter.frequency.setTargetAtTime(cutoffHz, now, 0.16);
+    if (this.rainSource) {
+      const rate = 0.96 + rain * 0.10 + speedBlend * 0.05;
+      this.rainSource.playbackRate.setTargetAtTime(rate, now, 0.16);
+    }
   }
 
   /** Lift-off backfire: a burst of pops right after the lift, then sparse crackles while overrunning at high rpm. */
@@ -188,8 +372,18 @@ export class VehicleAudio {
       try { source?.stop(); } catch { /* a source may not have started */ }
       source?.disconnect();
     }
+    try { this.rainSource?.stop(); } catch { /* may not have started */ }
+    this.rainSource?.disconnect();
+    this.rainSource = null;
+    this.rainFilter?.disconnect();
+    this.rainFilter = null;
+    this.rainGain?.disconnect();
+    this.rainGain = null;
+    this.thunderGain?.disconnect();
+    this.thunderGain = null;
     this.loadScrubber?.disconnect();
     this.loadScrubber = null;
+    this.loadWorkletPort = null;
     this.master?.disconnect();
     this.popGain?.disconnect();
     this.popGain = null;
@@ -208,11 +402,14 @@ export class VehicleAudio {
         await Promise.all((Object.entries(AUDIO_FILES) as [SoundLayer, string][]).map(async ([layer, url]) => {
           try {
             const response = await fetch(url);
-            if (response.ok) files[layer] = await response.arrayBuffer();
+            if (response.ok && !(response.headers.get('content-type') ?? '').includes('text/html')) {
+              files[layer] = await response.arrayBuffer();
+            }
           } catch {
             // Files will be added later; silently skip absent clips.
           }
         }));
+        await this.fetchMissingWeatherRaw();
         return files;
       })();
     }
@@ -248,7 +445,71 @@ export class VehicleAudio {
       source.start();
       this.sources[layer] = source;
     }
+    this.startRainLoop();
     this.startLoadScrubber();
+  }
+
+  private startRainLoop(): void {
+    const context = this.context;
+    const buffer = this.weatherBuffers.rain;
+    const filter = this.rainFilter;
+    if (!context || context.state !== 'running' || !buffer || !filter || this.rainSource || this.disposed) return;
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    source.connect(filter);
+    source.start();
+    this.rainSource = source;
+  }
+
+  private async fetchMissingWeatherRaw(): Promise<void> {
+    await Promise.all((Object.keys(WEATHER_CANDIDATES) as WeatherClip[]).map(async (clip) => {
+      if (this.weatherRaw[clip] || this.weatherBuffers[clip]) return;
+      for (const url of WEATHER_CANDIDATES[clip]) {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) continue;
+          const contentType = response.headers.get('content-type') ?? '';
+          if (contentType.includes('text/html')) continue;
+          const buf = await response.arrayBuffer();
+          if (buf.byteLength > 64) {
+            this.weatherRaw[clip] = buf;
+            break;
+          }
+        } catch {
+          // Try next candidate path.
+        }
+      }
+    }));
+  }
+
+  private async decodeWeatherBuffers(): Promise<void> {
+    const context = this.context;
+    if (!context) return;
+    await Promise.all((Object.keys(WEATHER_CANDIDATES) as WeatherClip[]).map(async (clip) => {
+      if (this.weatherBuffers[clip] || !this.weatherRaw[clip]) return;
+      try {
+        this.weatherBuffers[clip] = await context.decodeAudioData(this.weatherRaw[clip]!.slice(0));
+      } catch {
+        delete this.weatherRaw[clip];
+      }
+    }));
+  }
+
+  private retryMissingWeather(now: number, onLoaded?: () => void): void {
+    if (this.weatherLoading || now - this.lastWeatherRetryAt < WEATHER_RETRY_SECONDS) return;
+    this.lastWeatherRetryAt = now;
+    this.weatherLoading = true;
+    void (async () => {
+      try {
+        await this.fetchMissingWeatherRaw();
+        await this.decodeWeatherBuffers();
+        if (this.weatherBuffers.rain && !this.rainSource) this.startRainLoop();
+        if (onLoaded && this.weatherBuffers.thunder) onLoaded();
+      } finally {
+        this.weatherLoading = false;
+      }
+    })();
   }
 
   /**
@@ -261,25 +522,86 @@ export class VehicleAudio {
     const context = this.context;
     const buffer = this.buffers.load;
     const gain = this.gains.load;
-    if (!context || !buffer || !gain || this.loadScrubber || this.disposed) return;
+    if (!context || !buffer || !gain || this.loadScrubber || this.scrubberStarting || this.disposed) return;
 
-    const node = context.createScriptProcessor(2048, 0, Math.max(1, buffer.numberOfChannels));
+    this.mapLoadRpm(this.rpm, buffer);
+    const channelCount = Math.max(1, buffer.numberOfChannels);
     const channels = Array.from({ length: buffer.numberOfChannels }, (_, i) => buffer.getChannelData(i));
-    const length = buffer.length;
-    // Recording samples per output sample: plays the clip at its recorded pitch.
     const step = buffer.sampleRate / context.sampleRate;
     const windowSamples = Math.max(64, Math.floor(Math.min(LOAD_WINDOW_SECONDS, buffer.duration / 2) * context.sampleRate));
     const fadeSamples = Math.max(32, Math.floor(windowSamples * LOAD_CROSSFADE_SHARE));
+
+    // Prefer AudioWorkletNode so audio synthesis runs off the main UI/render thread.
+    if (context.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+      this.scrubberStarting = true;
+      void (async () => {
+        try {
+          if (!registeredContexts.has(context)) {
+            const blobUrl = URL.createObjectURL(new Blob([SCRUBBER_WORKLET_CODE], { type: 'application/javascript' }));
+            try {
+              await context.audioWorklet.addModule(blobUrl);
+              registeredContexts.add(context);
+            } finally {
+              URL.revokeObjectURL(blobUrl);
+            }
+          }
+          if (this.disposed || this.context !== context) return;
+          const worklet = new AudioWorkletNode(context, SCRUBBER_WORKLET_NAME, {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [channelCount],
+          });
+          worklet.port.postMessage({
+            type: 'init',
+            channels: channels.map((ch) => ch.slice(0)),
+            step,
+            windowSamples,
+            fadeSamples,
+            targetOffset: this.loadState.targetOffset,
+          });
+          worklet.connect(gain);
+          this.loadScrubber = worklet;
+          this.loadWorkletPort = worklet.port;
+          this.lastSentOffset = this.loadState.targetOffset;
+          this.lastSentLimiter = this.loadState.limiter;
+          return;
+        } catch {
+          // Fall back to zero-allocation ScriptProcessorNode below.
+        } finally {
+          this.scrubberStarting = false;
+        }
+        this.startFallbackScriptScrubber(context, buffer, gain, channels, step, windowSamples, fadeSamples);
+      })();
+      return;
+    }
+
+    this.startFallbackScriptScrubber(context, buffer, gain, channels, step, windowSamples, fadeSamples);
+  }
+
+  private startFallbackScriptScrubber(
+    context: AudioContext,
+    buffer: AudioBuffer,
+    gain: GainNode,
+    channels: Float32Array[],
+    step: number,
+    windowSamples: number,
+    fadeSamples: number,
+  ): void {
+    if (this.disposed || this.loadScrubber) return;
+    const outChannels = Math.max(1, buffer.numberOfChannels);
+    const node = context.createScriptProcessor(2048, 0, outChannels);
+    const outputs = new Array<Float32Array>(outChannels);
+    const length = buffer.length;
     const state = this.loadState;
-    let current = state.targetOffset;   // playhead of the grain in front (recording samples)
-    let previous = 0;                    // playhead of the grain fading out
-    let fade = 1;                        // 0..1 progress of the crossfade (1 = no fade)
-    let counter = 0;                     // output samples since the current grain started
+    let current = state.targetOffset;
+    let previous = 0;
+    let fade = 1;
+    let counter = 0;
     let limiterPhase = 0;
 
     const read = (channel: Float32Array, position: number): number => {
       const index = Math.min(length - 2, Math.max(0, position));
-      const base = Math.floor(index);
+      const base = index | 0;
       const t = index - base;
       return channel[base] * (1 - t) + channel[base + 1] * t;
     };
@@ -287,10 +609,10 @@ export class VehicleAudio {
     node.onaudioprocess = (event) => {
       const out = event.outputBuffer;
       const sampleRate = out.sampleRate;
-      const outputs = Array.from({ length: out.numberOfChannels }, (_, c) => out.getChannelData(c));
+      const nCh = out.numberOfChannels;
+      for (let c = 0; c < nCh; c += 1) outputs[c] = out.getChannelData(c);
       for (let i = 0; i < out.length; i += 1) {
         if (counter >= windowSamples - fadeSamples || current >= length - 2) {
-          // Start the next grain at the RPM's place in the sweep; fade the old one out.
           previous = current;
           current = Math.min(state.targetOffset, Math.max(0, length - 2 - windowSamples * step));
           fade = 0;
@@ -304,7 +626,7 @@ export class VehicleAudio {
         }
         const fadeIn = fade < 1 ? Math.sin(fade * Math.PI * 0.5) : 1;
         const fadeOut = fade < 1 ? Math.cos(fade * Math.PI * 0.5) : 0;
-        for (let c = 0; c < outputs.length; c += 1) {
+        for (let c = 0; c < nCh; c += 1) {
           const input = channels[Math.min(c, channels.length - 1)];
           let sample = read(input, current) * fadeIn;
           if (fade < 1) sample += read(input, previous) * fadeOut;
@@ -320,7 +642,6 @@ export class VehicleAudio {
     };
     node.connect(gain);
     this.loadScrubber = node;
-    this.mapLoadRpm(this.rpm, buffer);
   }
 
   private updateLoadScrubber(rpm: number, atLimiter: boolean): void {
@@ -328,6 +649,15 @@ export class VehicleAudio {
     if (!buffer || !this.loadScrubber) return;
     this.mapLoadRpm(rpm, buffer);
     this.loadState.limiter = atLimiter;
+    if (this.loadWorkletPort && (Math.abs(this.loadState.targetOffset - this.lastSentOffset) > 24 || atLimiter !== this.lastSentLimiter)) {
+      this.lastSentOffset = this.loadState.targetOffset;
+      this.lastSentLimiter = atLimiter;
+      this.loadWorkletPort.postMessage({
+        type: 'state',
+        targetOffset: this.loadState.targetOffset,
+        limiter: atLimiter,
+      });
+    }
   }
 
   private mapLoadRpm(rpm: number, buffer: AudioBuffer): void {

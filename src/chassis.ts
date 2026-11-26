@@ -71,23 +71,23 @@ export interface TireDebugState {
 export const TIRE_PROFILES: Record<TireProfileId, { label: string; front: TireTuningParams; rear: TireTuningParams }> = {
   street: {
     label: 'Street',
-    front: { frictionCoeff: 0.93, longStiffness: 0.98, latStiffness: 1.10, peakSlipAngleDeg: 7.4, peakSlipRatio: 0.12, postPeakGrip: 0.83, loadSensitivity: 0.18 },
-    rear: { frictionCoeff: 0.93, longStiffness: 0.98, latStiffness: 1.12, peakSlipAngleDeg: 7.2, peakSlipRatio: 0.12, postPeakGrip: 0.85, loadSensitivity: 0.18 },
+    front: { frictionCoeff: 1.18, longStiffness: 1.35, latStiffness: 1.48, peakSlipAngleDeg: 5.4, peakSlipRatio: 0.09, postPeakGrip: 0.80, loadSensitivity: 0.15 },
+    rear: { frictionCoeff: 1.18, longStiffness: 1.35, latStiffness: 1.56, peakSlipAngleDeg: 5.2, peakSlipRatio: 0.09, postPeakGrip: 0.58, loadSensitivity: 0.15 },
   },
   sport: {
     label: 'Sport',
-    front: { frictionCoeff: 1.0, longStiffness: 1.12, latStiffness: 1.25, peakSlipAngleDeg: 6.6, peakSlipRatio: 0.10, postPeakGrip: 0.84, loadSensitivity: 0.16 },
-    rear: { frictionCoeff: 1.0, longStiffness: 1.12, latStiffness: 1.38, peakSlipAngleDeg: 6.2, peakSlipRatio: 0.10, postPeakGrip: 0.86, loadSensitivity: 0.16 },
+    front: { frictionCoeff: 1.38, longStiffness: 1.65, latStiffness: 1.85, peakSlipAngleDeg: 4.5, peakSlipRatio: 0.08, postPeakGrip: 0.85, loadSensitivity: 0.13 },
+    rear: { frictionCoeff: 1.38, longStiffness: 1.65, latStiffness: 1.96, peakSlipAngleDeg: 4.3, peakSlipRatio: 0.08, postPeakGrip: 0.54, loadSensitivity: 0.13 },
   },
   'semi-slick': {
     label: 'Semi-Slick',
-    front: { frictionCoeff: 1.15, longStiffness: 1.36, latStiffness: 1.52, peakSlipAngleDeg: 5.7, peakSlipRatio: 0.09, postPeakGrip: 0.78, loadSensitivity: 0.12 },
-    rear: { frictionCoeff: 1.15, longStiffness: 1.36, latStiffness: 1.54, peakSlipAngleDeg: 5.6, peakSlipRatio: 0.09, postPeakGrip: 0.80, loadSensitivity: 0.12 },
+    front: { frictionCoeff: 1.80, longStiffness: 2.50, latStiffness: 2.50, peakSlipAngleDeg: 3.0, peakSlipRatio: 0.06, postPeakGrip: 1.0, loadSensitivity: 0.10 },
+    rear: { frictionCoeff: 1.80, longStiffness: 2.50, latStiffness: 2.50, peakSlipAngleDeg: 3.0, peakSlipRatio: 0.06, postPeakGrip: 1.0, loadSensitivity: 0.10 },
   },
   drift: {
     label: 'Drift Compound',
-    front: { frictionCoeff: 0.95, longStiffness: 1.02, latStiffness: 1.16, peakSlipAngleDeg: 8.0, peakSlipRatio: 0.13, postPeakGrip: 0.86, loadSensitivity: 0.18 },
-    rear: { frictionCoeff: 0.86, longStiffness: 0.94, latStiffness: 0.98, peakSlipAngleDeg: 9.0, peakSlipRatio: 0.14, postPeakGrip: 0.90, loadSensitivity: 0.20 },
+    front: { frictionCoeff: 1.22, longStiffness: 1.30, latStiffness: 1.60, peakSlipAngleDeg: 5.5, peakSlipRatio: 0.10, postPeakGrip: 0.86, loadSensitivity: 0.15 },
+    rear: { frictionCoeff: 0.94, longStiffness: 1.02, latStiffness: 1.12, peakSlipAngleDeg: 7.8, peakSlipRatio: 0.13, postPeakGrip: 0.56, loadSensitivity: 0.19 },
   },
 };
 
@@ -101,10 +101,14 @@ const REFERENCE_WEIGHT = 1450;         // kg
 const REAR_STAGGER_PER_BIAS = 1.0;     // rear grip gain per unit of rearward weight bias (0.39 front -> +11%)
 const WHEEL_INERTIA = 1.1;             // kg·m², wheel, tyre, brake disc and hub
 const FRONT_BRAKE_BIAS = 0.68;
-const HANDBRAKE_FORCE_G = 1.4;         // rear wheel lock force per rear tyre load
+const HANDBRAKE_FORCE_G = 2.4;         // hydraulic rear lock force per rear tyre load
 const ABS_SLIP_SHARE = 0.95;           // ABS holds the slip ratio this close to the tyre's peak
 const TCS_SLIP_SHARE = 0.95;           // traction control slip target, share of peak
 const SUBSTEP = 1 / 240;
+// Drift steering assist: smoothed path-bending acceleration (g) when steering into an active slide.
+const DRIFT_ASSIST_G = 0.44;
+const DRIFT_ASSIST_SLIP = [0.14, 0.32] as const;
+const DRIFT_SPIN_DAMP = 5.4;
 
 /**
  * Peak friction coefficient of the car's own tyres (Sport compound).
@@ -146,7 +150,11 @@ export function nonlinearTireResponse(normSlip: number, stiffness: number, postP
   }
   const d = u - 1;
   const slide = Math.min(1, Math.max(0.25, postPeakGrip));
-  return slide + (1 - slide) / (1 + 1.35 * k * d * d);
+  // Gentle plateau right past peak (u = 1..1.4) keeps limit track cornering forgiving;
+  // deeper slides (u > 1.8) decay smoothly to kinetic sliding friction (`postPeakGrip`)
+  // so rear tyres genuinely stay loose in a drift instead of snapping back at 90%+ grip.
+  const decay = (0.88 * k * d * d * (1 + 0.45 * d)) / (1 + 0.35 * d);
+  return slide + (1 - slide) / (1 + decay);
 }
 
 export interface ChassisBody {
@@ -168,6 +176,8 @@ export interface ChassisInput {
   lineLock: boolean;       // burnout: the foot brake holds only the undriven axle (fronts on RWD, rears on FWD)
   handbrake: number;       // 0..1 rear wheels locked
   tcs: boolean;            // traction control
+  /** Raw driver steering input -1..1 (+ towards the right vector), used by the drift steering assist. */
+  steerInput?: number;
   // Optional per-wheel vertical loads (m/s², sum ~ GRAVITY) from 4-corner suspension:
   // [FL, FR, RL, RR]
   wheelSuspensionLoads?: readonly number[];
@@ -223,6 +233,10 @@ function emptyTelemetry(): SingleTireTelemetry {
   };
 }
 
+export function defaultTireProfileFor(spec: VehicleSpec): TireProfileId {
+  return spec.category === 'SUPER' || spec.bodyStyle === 'super' ? 'semi-slick' : 'sport';
+}
+
 export class Chassis {
   private massKg = REFERENCE_WEIGHT;
   private baseFrontWeightShare = 0.5;
@@ -245,6 +259,7 @@ export class Chassis {
   private bodySlipRate = 0;
   private baseMu = 1.0;          // peak friction coefficient of the car's own tyres
   private latGripScale = 1.0;    // lateral cornering grip bonus (keeps 0-100 & braking distances realistic)
+  private specBraking = 12;      // m/s², catalog braking rating for the active car
   private brakeDecel = 12;       // m/s² the brake system can ask for (more than the tyres give)
   private airDrag = 0;           // m/s² per (m/s)²
   private frontRollShare = 0.55; // share of lateral load transfer carried by the front axle
@@ -256,7 +271,10 @@ export class Chassis {
   private rollShift = 0;      // smoothed lateral load transfer share
   private accelLong = 0;      // m/s², last substep
   private accelLat = 0;       // m/s², last substep
+  private rearSlipHeat = 0;   // 0..1 short-term rear tyre slip memory so lifting off gas mid-drift doesn't snap-hook
+  private driftAssistCmd = 0; // smoothed -1..1 inward drift assist so key transitions never jerk
 
+  private defaultProfileId: TireProfileId = 'sport';
   private profileId: TireProfileId = 'sport';
   private editTarget: TireEditTarget = 'all';
   // 0: FL (+X, +Z), 1: FR (-X, +Z), 2: RL (+X, -Z), 3: RR (-X, -Z)
@@ -308,11 +326,13 @@ export class Chassis {
     Object.assign(this.tires[1], preset.front);
     Object.assign(this.tires[2], preset.rear);
     Object.assign(this.tires[3], preset.rear);
+    const maxCompoundMu = Math.max(1, preset.front.frictionCoeff, preset.rear.frictionCoeff);
+    this.brakeDecel = Math.max(this.specBraking, 1.25 * GRAVITY * this.baseMu * maxCompoundMu);
   }
 
   resetTuningToDefault(): void {
     this.editTarget = 'all';
-    this.applyProfile('sport');
+    this.applyProfile(this.defaultProfileId);
   }
 
   updateTuning(changes: Partial<TireTuningParams>, target: TireEditTarget = this.editTarget): void {
@@ -330,7 +350,7 @@ export class Chassis {
       if (changes.frictionCoeff !== undefined) tire.frictionCoeff = clamp(changes.frictionCoeff, 0.4, 2.2);
       if (changes.longStiffness !== undefined) tire.longStiffness = clamp(changes.longStiffness, 0.3, 2.8);
       if (changes.latStiffness !== undefined) tire.latStiffness = clamp(changes.latStiffness, 0.3, 2.8);
-      if (changes.peakSlipAngleDeg !== undefined) tire.peakSlipAngleDeg = clamp(changes.peakSlipAngleDeg, 3.0, 20.0);
+      if (changes.peakSlipAngleDeg !== undefined) tire.peakSlipAngleDeg = clamp(changes.peakSlipAngleDeg, 2.0, 20.0);
       if (changes.peakSlipRatio !== undefined) tire.peakSlipRatio = clamp(changes.peakSlipRatio, 0.04, 0.35);
       if (changes.postPeakGrip !== undefined) tire.postPeakGrip = clamp(changes.postPeakGrip, 0.35, 1.0);
       if (changes.loadSensitivity !== undefined) tire.loadSensitivity = clamp(changes.loadSensitivity, 0.0, 0.5);
@@ -440,56 +460,52 @@ export class Chassis {
       const oppositeToSlide = bodySlip > 0.04 && Math.sign(steerInput) === Math.sign(bodyAngle);
 
       if (oppositeToSlide) {
-        const counterBlend = smoothstep(speed, 3.0, 7.0) * smoothstep(bodySlip, 0.04, 0.11);
+        const counterBlend = smoothstep(speed, 3.0, 7.0) * smoothstep(bodySlip, 0.06, 0.16);
         if (counterBlend > 0.01) {
-          // Countersteering:
-          // - When yawRate is rotating INTO the slide (`spinIntoSlide > 0`), apply strong
-          //   opposing slip angle to arrest rotation immediately.
-          // - When yawRate is rotating OUT of the slide (`recoveryRate > 0`), maintain active
-          //   countersteer slip angle (`cmdSlip`) so drift angle progressively decreases at
-          //   ~45-65 deg/s, only damping if recoveryRate exceeds a safe straighten-out rate.
+          // Critically-damped countersteering:
+          // - Arrest rotation into the slide (`spinIntoSlide > 0`) promptly without slamming to full lock.
+          // - Cap straighten-out angular rate proportional to remaining `bodySlip` (`~1.55 * bodySlip`)
+          //   so as the drift angle approaches zero, yawRate tapers to zero with no tank-slapper whip.
           const spinIntoSlide = Math.max(0, -yawRate * steerInput);
           const recoveryRate = Math.max(0, yawRate * steerInput);
-          const excessRecovery = Math.max(0, recoveryRate - 0.62);
-          const cmdSlip = Math.max(-frontPeakRad * 0.45, frontPeakRad * 0.52 + spinIntoSlide * 0.26 - excessRecovery * 0.55);
+          const safeRecovery = 0.14 + 1.55 * bodySlip;
+          const excessRecovery = Math.max(0, recoveryRate - safeRecovery);
+          const cmdSlip = clamp(
+            frontPeakRad * 0.52 + spinIntoSlide * 0.34 - excessRecovery * 0.68,
+            -frontPeakRad * 0.55,
+            frontPeakRad * 1.0,
+          );
           const slideTarget = clamp(frontTravel + steerInput * cmdSlip, -fullLock, fullLock);
           target = gripTarget * (1 - counterBlend) + slideTarget * counterBlend;
-          rate = 18.0 * toeTurnInBoost;
+          rate = 12.5 * toeTurnInBoost;
         } else {
           target = gripTarget;
           rate = gripRate;
         }
       } else {
-        // Steering INTO the turn (initiating a drift or widening an existing drift):
-        // When the rear axle is broken loose (handbrake or power oversteer) or the body is
-        // sliding, track `frontTravel + steerInput * cmdSlip` so the front tires maintain
-        // optimal peak turn-in bite (`~8°` slip angle) during initiation, and then damp
-        // against excessive yawRate/bodySlip so holding turn-in widens the angle controllably.
-        // Body slip alone is not a slide: at speed, plain grip cornering already carries 4-6 deg of
-        // body slip. Only count it once the rear axle is really past peak, otherwise this branch
-        // adds inward lock mid-corner and turns ordinary limit cornering into a spin.
-        const activeSlide = Math.max(bodySlip * smoothstep(this.output.rearSlide, 0.02, 0.25), this.output.rearSlide * 0.35);
-        // Steering into a slide widens a drift at drifting speeds. At motorway speeds holding the
-        // key into a corner means "corner at the limit", never "add lock to a sliding rear".
-        const turnInSlideBlend = smoothstep(speed, 3.5, 8.0) * (1 - smoothstep(speed, 24, 32))
-          * smoothstep(activeSlide, 0.08, 0.20);
+        // Steering INTO the turn while sliding: track `frontTravel + steerInput * cmdSlip` all the
+        // way through 3rd/4th-gear drift speeds (up to ~180 km/h) so there is no mid-drift wheel
+        // snap around 90-115 km/h. Normal grip cornering (< 9° body slip) stays on `gripTarget`.
+        const activeSlide = Math.max(
+          bodySlip * smoothstep(this.output.rearSlide, 0.05, 0.28),
+          this.output.rearSlide * 0.32 * smoothstep(bodySlip, 0.12, 0.22),
+        );
+        const turnInSlideBlend = smoothstep(speed, 3.5, 8.0) * (1 - smoothstep(speed, 46, 56))
+          * smoothstep(activeSlide, 0.12, 0.24);
         if (turnInSlideBlend > 0.01) {
           const spinRateInTurn = Math.max(0, yawRate * steerInput);
-          const dampingEngage = smoothstep(bodySlip, 0.32, 0.58);
-          const excessYaw = Math.max(0, spinRateInTurn - 1.85) * dampingEngage;
-          const angleTaper = 1 - 0.50 * smoothstep(bodySlip, 0.60, 0.95);
-          const cmdSlip = frontPeakRad * 1.15 * angleTaper - excessYaw * 0.22;
+          const dampingEngage = smoothstep(bodySlip, 0.28, 0.54);
+          const excessYaw = Math.max(0, spinRateInTurn - 1.35) * dampingEngage;
+          const angleTaper = 1 - 0.85 * smoothstep(bodySlip, 0.52, 0.84);
+          const cmdSlip = clamp(frontPeakRad * 0.95 * angleTaper - excessYaw * 0.30, -frontPeakRad * 0.25, frontPeakRad * 0.95);
           const rawSlideTarget = clamp(frontTravel + steerInput * cmdSlip, -fullLock, fullLock);
-          // Once bodySlip is established (> 20°), cap inward steering to maxGripSteer in
-          // the turn direction; during initial breakaway (< 20°), allow up to 1.65 * maxGripSteer
-          // so the front tires can reach full peak slip angle while yawRate builds.
-          const initAllowance = 1 + 0.80 * (1 - smoothstep(bodySlip, 0.26, 0.50));
+          const initAllowance = 1 + 0.85 * (1 - smoothstep(bodySlip, 0.28, 0.54));
           const maxInwardSteer = Math.min(fullLock, maxGripSteer * initAllowance);
           const slideTarget = steerInput > 0
             ? Math.min(rawSlideTarget, maxInwardSteer)
             : Math.max(rawSlideTarget, -maxInwardSteer);
           target = gripTarget * (1 - turnInSlideBlend) + slideTarget * turnInSlideBlend;
-          rate = (7.2 + 2.5 * turnInSlideBlend) * toeTurnInBoost;
+          rate = (7.5 + 2.5 * turnInSlideBlend) * toeTurnInBoost;
         } else {
           target = gripTarget;
           rate = gripRate;
@@ -497,16 +513,15 @@ export class Chassis {
       }
     } else {
       // Steering released: return to 0 in normal driving; during an oversteer slide,
-      // pneumatic trail / caster self-aligns the front wheels toward zero front slip angle
-      // (`frontTravel`) so the front tires stop pulling the nose deeper into the spin.
-      const oversteerSlide = smoothstep(bodySlip, 0.11, 0.24) * smoothstep(speed, 3.5, 8.0);
-      // Self-steer settles slightly toward the turn at drifting speeds so the front axle carries
-      // its share of the cornering force; at high speed releasing the wheel always straightens out.
+      // pneumatic trail / caster self-aligns the front wheels with enough inward bite to balance
+      // the sliding rear (~66% grip), so lifting off gas + wheel lets the drift glide smoothly
+      // instead of snapping straight or whipping the other way.
+      const oversteerSlide = smoothstep(bodySlip, 0.13, 0.26) * smoothstep(speed, 3.5, 8.0);
       const driftHold = 1 - smoothstep(speed, 38, 50);
-      const holdBias = -Math.sign(bodyAngle) * frontPeakRad * 0.34 * smoothstep(bodySlip, 0.13, 0.30) * driftHold;
-      const casterAlign = frontTravel + holdBias + this.bodySlipRate * 0.14;
+      const holdBias = -Math.sign(bodyAngle) * frontPeakRad * 0.56 * smoothstep(bodySlip, 0.15, 0.34) * driftHold;
+      const casterAlign = frontTravel + holdBias + clamp(this.bodySlipRate * 0.09, -0.14, 0.14);
       target = clamp(casterAlign * oversteerSlide, -fullLock, fullLock);
-      rate = 5.2 + 5.0 * oversteerSlide;
+      rate = 5.2 + 4.2 * oversteerSlide;
     }
 
     return approach(currentAngle, target, rate * handling * dt);
@@ -557,7 +572,10 @@ export class Chassis {
       : spec.category === 'SEHIR' ? 1.05
       : 1.0;
     // Brakes strong enough to lock the tyres at any speed; ABS then holds them at the limit.
-    this.brakeDecel = Math.max(spec.braking, 1.25 * GRAVITY * this.baseMu);
+    this.specBraking = spec.braking;
+    this.defaultProfileId = defaultTireProfileFor(spec);
+    this.editTarget = 'all';
+    this.applyProfile(this.defaultProfileId);
     this.airDrag = airDragCoefficient(spec);
     const rwdStaggerFloor = this.driveLayout === 'RWD' && spec.category !== 'EKONOMI' && spec.category !== 'SEHIR' ? 0.04 : 0;
     this.rearStagger = 1 + Math.max(rwdStaggerFloor, REAR_STAGGER_PER_BIAS * Math.max(0, 0.5 - this.baseFrontWeightShare));
@@ -575,6 +593,8 @@ export class Chassis {
     this.rollShift = 0;
     this.accelLong = 0;
     this.accelLat = 0;
+    this.rearSlipHeat = 0;
+    this.driftAssistCmd = 0;
     Object.assign(this.output, emptyChassisOutput());
     const totalWeightN = this.massKg * GRAVITY;
     for (let i = 0; i < 4; i += 1) {
@@ -605,7 +625,10 @@ export class Chassis {
     const frontDriveMass = input.drivelineMass * (1 - rearShare) * 0.5;
     const rearDriveMass = input.drivelineMass * rearShare * 0.5;
     const frontDrive = input.frontDriveForce * 0.5;
-    const rearDrive = input.rearDriveForce * 0.5;
+    // Pulling the hydraulic handbrake declutches rear drive so the rear wheels lock cleanly
+    // even if the player keeps holding W on entry.
+    const handbrakeCut = 1 - smoothstep(input.handbrake, 0.15, 0.45);
+    const rearDrive = input.rearDriveForce * 0.5 * handbrakeCut;
 
     if (!input.grounded) {
       this.stepAirborne(input, dt, wheelMass + frontDriveMass, wheelMass + rearDriveMass);
@@ -697,6 +720,11 @@ export class Chassis {
       const vy = body.velocity.x * cos - body.velocity.z * sin;
       const speed = Math.hypot(vx, vy);
       const r = body.yawRate;
+      const bodySlipAngle = speed > 1.5 ? Math.atan2(Math.abs(vy), Math.max(Math.abs(vx), 0.5)) : 0;
+      // Once the driver has deliberately kicked the car past ~19° sideways (e.g. via handbrake),
+      // let the rear wheels spin on throttle instead of having TCS choke the drift dead; below 19°
+      // TCS retains 100% authority so normal cornering never spins.
+      const tcsDriftBypass = smoothstep(bodySlipAngle, 0.33, 0.46);
 
       // 1. Wheel speeds: engine, brakes and the road's pull, solved implicitly so
       //    stiff tyres stay stable at any speed.
@@ -714,7 +742,8 @@ export class Chassis {
           continue;
         }
         const fz = load * weightN;
-        const mu = this.tireMu(i, fz, nominalLoad);
+        const heatTrim = isFront ? 1 : 1 - 0.10 * this.rearSlipHeat;
+        const mu = this.tireMu(i, fz, nominalLoad) * heatTrim;
         const camberLong = isFront ? frontCamberLong : rearCamberLong;
         const camberLat = isFront ? frontCamberLat : rearCamberLat;
         const alpha = Math.atan2(-kin.vLat, Math.max(Math.abs(vLong), MIN_ROLLING_SPEED));
@@ -746,8 +775,9 @@ export class Chassis {
           uNew = Math.sign(uNew) * Math.max(0, Math.abs(uNew) - lockForce / denom);
         }
         const accelerating = (driveForce > 0 && uNew > vLong) || (driveForce < 0 && uNew < vLong && vLong < 0.5);
-        if (accelerating && input.tcs) {
-          const tcsSlip = tp.peakSlipRatio * TCS_SLIP_SHARE * Math.sqrt(Math.max(0.1, 1 - cornering * cornering));
+        if (accelerating && input.tcs && tcsDriftBypass < 0.99) {
+          const baseTcsSlip = tp.peakSlipRatio * TCS_SLIP_SHARE * Math.sqrt(Math.max(0.1, 1 - cornering * cornering));
+          const tcsSlip = baseTcsSlip + tcsDriftBypass * 1.2;
           const ceiling = vLong + Math.sign(driveForce) * tcsSlip * refSpeed;
           if (driveForce > 0 && uNew > ceiling) {
             if (uNew - ceiling > 0.05) tcsActive = true;
@@ -798,7 +828,8 @@ export class Chassis {
         this.wheelKinematics(i, vx, vy, r, halfTrack);
         const vLong = kin.vLong;
         const fz = load * weightN;
-        const mu = this.tireMu(i, fz, nominalLoad);
+        const heatTrim = isFront ? 1 : 1 - 0.10 * this.rearSlipHeat;
+        const mu = this.tireMu(i, fz, nominalLoad) * heatTrim;
         const peakAngle = Math.max(tp.peakSlipAngleDeg * DEG_TO_RAD, 0.03);
         const alpha = Math.atan2(-kin.vLat, Math.max(Math.abs(vLong), MIN_ROLLING_SPEED));
         const refSpeed = Math.max(Math.abs(vLong), SLIP_SPEED_FLOOR);
@@ -820,7 +851,11 @@ export class Chassis {
         yawTorque += wz * fyBody - wx * fxBody;
 
         const grip = mu * fz;
-        const sideUse = grip > 1 ? Math.abs(tire.fy) / grip : 0;
+        const peakForce = grip * Math.max(
+          isFront ? frontCamberLong : rearCamberLong,
+          isFront ? frontCamberLat : rearCamberLat,
+        );
+        const sideUse = peakForce > 1 ? Math.abs(tire.fy) / peakForce : 0;
         const angleSlide = smoothstep(Math.abs(alpha), peakAngle * 1.15, peakAngle * 3.0);
         const lockSlide = smoothstep(-kappa * Math.sign(vLong || 1), tp.peakSlipRatio * 2.5, 0.6);
         const driveForce = isFront ? frontDrive : rearDrive;
@@ -845,11 +880,17 @@ export class Chassis {
           tel.normalLoadN = fz;
           tel.longForceN = tire.fx;
           tel.latForceN = tire.fy;
-          tel.gripUtilization = grip > 1 ? Math.min(1, Math.hypot(tire.fx, tire.fy) / grip) : 0;
+          tel.gripUtilization = peakForce > 1 ? Math.min(1, Math.hypot(tire.fx, tire.fy) / peakForce) : 0;
           tel.wheelAngularSpeed = this.wheelSpeed[i] / radius;
           tel.grounded = true;
         }
       }
+
+      // Short-term rear slip/thermal memory: builds quickly when rear tyres spin or slide, decays
+      // over ~0.45 s so lifting off the throttle mid-drift glides smoothly instead of snap-hooking.
+      const heatTarget = clamp(Math.max(rearSlideSub, rearSpinSub), 0, 1);
+      const heatTau = heatTarget > this.rearSlipHeat ? 0.06 : 0.45;
+      this.rearSlipHeat += (heatTarget - this.rearSlipHeat) * (1 - Math.exp(-h / heatTau));
 
       // 4. Body motion: tyre forces, air drag and rolling resistance.
       let totalAx = sumFx / m - this.airDrag * vx * speed;
@@ -860,6 +901,23 @@ export class Chassis {
       const pushing = input.frontDriveForce !== 0 || input.rearDriveForce !== 0;
       if (vx * nextVx < 0 && (input.brake > 0 || input.handbrake > 0 || !pushing)) totalAx = -vx / h;
       let yawAccel = yawTorque / m / this.yawInertia;
+
+      // Drift steering assist: check against actual drift side (`-vy`, NOT `yawRate` which flips
+      // sign during countersteer recovery!) and smooth the command so transitions never snap.
+      const steerIn = input.steerInput ?? 0;
+      const intoDrift = speed > 4 && Math.abs(vy) > 0.4 && steerIn * (-vy) > 0 && steerIn * r > -0.15;
+      const rawAssist = intoDrift
+        ? steerIn
+          * smoothstep(bodySlipAngle, DRIFT_ASSIST_SLIP[0], DRIFT_ASSIST_SLIP[1])
+          * smoothstep(speed, 5, 9)
+        : 0;
+      this.driftAssistCmd += (rawAssist - this.driftAssistCmd) * (1 - Math.exp(-h / 0.075));
+      if (Math.abs(this.driftAssistCmd) > 1e-3 && speed > 2) {
+        const assist = DRIFT_ASSIST_G * GRAVITY * this.driftAssistCmd;
+        totalAx += assist * (-vy / speed);
+        totalAy += assist * (vx / speed);
+        yawAccel -= Math.sign(r) * smoothstep(bodySlipAngle, 0.62, 0.90) * DRIFT_SPIN_DAMP * Math.abs(r) * Math.abs(this.driftAssistCmd);
+      }
 
       // Low-speed kinematic blend so parking and stop-and-go never jitter.
       const dynamic = smoothstep(speed, KINEMATIC_SPEED, DYNAMIC_SPEED);

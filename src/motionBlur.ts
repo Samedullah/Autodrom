@@ -4,7 +4,7 @@ import * as THREE from 'three';
 // the screen smeared towards the point the car is heading for. The middle of
 // the screen, where the car sits, stays sharp. With no blur the scene renders
 // straight to the screen, so standing still or slow driving costs nothing.
-const SAMPLES = 10;
+const SAMPLES = 6;
 
 const vertexShader = /* glsl */ `
   varying vec2 vUv;

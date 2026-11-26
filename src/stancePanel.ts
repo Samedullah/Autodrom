@@ -327,6 +327,10 @@ export class StancePanel {
     return this.open;
   }
 
+  setOpen(open: boolean): void {
+    this.root.hidden = !open;
+  }
+
   syncControls(config: StanceConfig, activePreset: StancePresetId | null): void {
     if (!this.open) return;
     for (const [id, btn] of this.presetButtons) {

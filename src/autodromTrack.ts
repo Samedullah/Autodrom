@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { GameSettings } from './save';
 import { HeightGrid, WallGrid, forEachWorldTriangle } from './terrain';
 import type { SpeedGate, WorldData } from './world';
@@ -304,8 +305,17 @@ function buildTrackSamples(): TrackSample[] {
   return samples;
 }
 
+let activeMaterialPool: Map<string, THREE.MeshStandardMaterial> | null = null;
+
 function standard(color: string, roughness = 0.85, metalness = 0.04): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({ color, roughness, metalness });
+  if (!activeMaterialPool) return new THREE.MeshStandardMaterial({ color, roughness, metalness });
+  const key = `${color}|${roughness}|${metalness}`;
+  let mat = activeMaterialPool.get(key);
+  if (!mat) {
+    mat = new THREE.MeshStandardMaterial({ color, roughness, metalness });
+    activeMaterialPool.set(key, mat);
+  }
+  return mat;
 }
 
 function buildMainTrackAsphalt(samples: TrackSample[], texture: THREE.CanvasTexture): THREE.Mesh {
@@ -1525,6 +1535,7 @@ function addFloodlightsAndScenery(parent: THREE.Group, samples: TrackSample[], l
 export function createAutodromWorld(settings: GameSettings): WorldData {
   const root = new THREE.Group();
   root.name = 'autodrom-gp';
+  activeMaterialPool = new Map();
 
   const textures = getTrackTextures();
   const samples = buildTrackSamples();
@@ -1581,14 +1592,10 @@ export function createAutodromWorld(settings: GameSettings): WorldData {
   const spawn = new THREE.Vector3(-68, 0, MAIN_STRAIGHT_Z);
   spawn.y = groundAt(spawn.x, spawn.z);
   wallGrid.clear(spawn.x, spawn.z, 6);
+  activeMaterialPool = null;
 
   const castsEnabled = settings.shadows && settings.quality !== 'low';
-  root.traverse((object) => {
-    const mesh = object as THREE.Mesh;
-    if (!mesh.isMesh) return;
-    if (mesh.userData.castsShadow === undefined) mesh.userData.castsShadow = false;
-    mesh.castShadow = castsEnabled && mesh.userData.castsShadow === true;
-  });
+  mergeAutodromStaticMeshes(root, castsEnabled);
 
   return {
     root,
@@ -1603,4 +1610,60 @@ export function createAutodromWorld(settings: GameSettings): WorldData {
     ready: Promise.resolve(),
     loadProgress: () => 1,
   };
+}
+
+function mergeAutodromStaticMeshes(root: THREE.Group, castsEnabled: boolean): void {
+  root.updateMatrixWorld(true);
+  const buckets = new Map<string, {
+    material: THREE.Material;
+    castsShadow: boolean;
+    polygonOffset: boolean;
+    geometries: THREE.BufferGeometry[];
+    sources: THREE.Mesh[];
+  }>();
+
+  root.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh || (mesh as THREE.InstancedMesh).isInstancedMesh || Array.isArray(mesh.material)) return;
+    if (mesh.userData.castsShadow === undefined) mesh.userData.castsShadow = false;
+    const castsShadow = mesh.userData.castsShadow === true;
+    mesh.castShadow = castsEnabled && castsShadow;
+
+    const geom = mesh.geometry;
+    const attrs = Object.keys(geom.attributes).sort().map((k) => k + geom.attributes[k].itemSize).join(',');
+    const key = `${mesh.material.uuid}|${castsShadow ? '1' : '0'}|${geom.index ? '1' : '0'}|${attrs}`;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = {
+        material: mesh.material,
+        castsShadow,
+        polygonOffset: Boolean(mesh.material.polygonOffset),
+        geometries: [],
+        sources: [],
+      };
+      buckets.set(key, bucket);
+    }
+    bucket.sources.push(mesh);
+  });
+
+  for (const bucket of buckets.values()) {
+    if (bucket.sources.length < 2) continue;
+    for (const src of bucket.sources) {
+      const cloned = src.geometry.clone();
+      cloned.applyMatrix4(src.matrixWorld);
+      bucket.geometries.push(cloned);
+    }
+    const merged = mergeGeometries(bucket.geometries, false);
+    for (const g of bucket.geometries) g.dispose();
+    if (!merged) continue;
+    const batchMesh = new THREE.Mesh(merged, bucket.material);
+    batchMesh.userData.castsShadow = bucket.castsShadow;
+    batchMesh.castShadow = castsEnabled && bucket.castsShadow;
+    batchMesh.receiveShadow = !bucket.polygonOffset;
+    root.add(batchMesh);
+    for (const src of bucket.sources) {
+      src.removeFromParent();
+      src.geometry.dispose();
+    }
+  }
 }
